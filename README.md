@@ -1,8 +1,6 @@
 # Reconator
 
 🆁🅴🅲🅾🅽🅰🆃🅾🆁
-- By @RootSploit                                           
-
 
 Bug Bounty Recon Tool kit
 
