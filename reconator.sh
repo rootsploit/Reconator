@@ -170,6 +170,13 @@ echo "    [*] Total No of Alive Subdomains Identified: $alivec "
 #Print Only the vulnerable ones
 echo "[+] Scanning for known CVE with Nuclei "
 cat $url/httpx/alive.txt | nuclei -t cves/ -o $url/nuclei/cve.txt -silent
+cat $url/httpx/alive.txt | nuclei -t vulnerabilities/ -o $url/nuclei/vulnerabilities.txt -silent
+cat $url/httpx/alive.txt | nuclei -t security-misconfiguration/ -o $url/nuclei/security-misconfiguration.txt -silent
+cat $url/httpx/alive.txt | nuclei -t default-credentials/ -o $url/nuclei/default-creds.txt -silent
+cat $url/httpx/alive.txt | nuclei -t tokens/ -o $url/nuclei/tokens.txt -silent
+cat $url/httpx/alive.txt | nuclei -t panels/ -o $url/nuclei/panels.txt -silent
+cat $url/httpx/alive.txt | nuclei -t fuzzing/ -o $url/nuclei/fuzz.txt -silent
+cat $url/httpx/alive.txt | nuclei -t files/ -o $url/nuclei/files.txt -silent
 
 #Run RustScan on all Alive Subdomains
 echo "[+] Performing Portscan on $alivec Alive Subdomains..."
