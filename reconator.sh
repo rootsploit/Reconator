@@ -142,9 +142,10 @@ echo "[+] Bruteforcing Subdomains with FFuF..."
 #Combine Subdomains
 echo "[+] Merging all the subdomains..."
 
-cat $url/subdomains/*.txt > $url/subdomains/subdomains.txt
-cat $url/subdomains/subdomains.txt | sort | uniq > $url/subdomains/temp-s.txt
-mv $url/subdomains/temp-s.txt $url/subdomains/subdomains.txt
+cat $url/subdomains/*.txt > $url/subdomains/temp-1.txt
+cat $url/subdomains/temp-1.txt | sort | uniq > $url/subdomains/temp-2.txt
+mv $url/subdomains/temp-2.txt $url/subdomains/subdomains.txt
+rm $url/subdomains/temp-1.txt $url/subdomains/temp-2.txt
 subcount=$(wc -l $url/subdomains/subdomains.txt | awk '{print $1}')
 echo "    [*] Total No of Subdomains Identified: $subcount "
 
