@@ -28,6 +28,9 @@ GO111MODULE=auto go get -u -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei
 #ffuf
 go get -u github.com/ffuf/ffuf
 
+#cf-check
+go get -u github.com/dwisiswant0/cf-check
+
 #httpx
 GO111MODULE=on go get -u -v github.com/projectdiscovery/httpx/cmd/httpx
 
