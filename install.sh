@@ -2,7 +2,7 @@
 
 #Install GoLang
 wget -q -O - https://git.io/vQhTU | bash
-sudo apt-get install jq grepcidr brutespray amass git nmap -y 
+sudo apt-get install jq grepcidr brutespray amass git nmap tmux screen -y 
 
 pip install shodan
 
@@ -28,8 +28,8 @@ GO111MODULE=auto go get -u -v github.com/projectdiscovery/nuclei/v2/cmd/nuclei
 #ffuf
 go get -u github.com/ffuf/ffuf
 
-#httprobe
-go get -u github.com/tomnomnom/httprobe
+#httpx
+GO111MODULE=on go get -u -v github.com/projectdiscovery/httpx/cmd/httpx
 
 #tko-subs
 go get github.com/anshumanbh/tko-subs
@@ -60,6 +60,8 @@ go get -u github.com/tomnomnom/qsreplace
 #dalfox
 go get -u github.com/hahwul/dalfox
 
+#Nuclei-Templates
+git clone https://github.com/projectdiscovery/nuclei-templates.git -o ~/
 
 #zdns
 git clone https://github.com/zmap/zdns.git
