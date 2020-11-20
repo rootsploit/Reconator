@@ -158,7 +158,7 @@ echo "    [*] Total No of Alive Subdomains Identified: $alivec "
 #Perform Subdomain Takeover with Nuclei
 nuclei -update-templates -silent
 echo "[+] Performing Subdomain Takeover with Nuclei "
-cat $url/httpx/alive.txt | nuclei -t -c 200 subdomain-takeover/ -o $url/potential_takeovers/nuclei.txt -silent
+cat $url/httpx/alive.txt | nuclei -c 200 -t subdomain-takeover/ -o $url/potential_takeovers/nuclei.txt -silent
 
 #Perform Subdomain Takeover with Subzy
 echo "[+] Performing Subdomain Takeover with Subzy "
