@@ -130,7 +130,7 @@ subcount=$(wc -l $url/subdomains/subfinder.txt | awk '{print $1}')
 echo "    [-] Subdomains Found with Subfinder: $subcount "
 
 #Run Amass
-#echo "[+] Harvesting subdomains with Amass..."
+echo "[+] Harvesting subdomains with Amass..."
 #amass enum -d $url >> $url/subdomains/amass.txt
 #sort -u $url/subdomains/f.txt >> $url/subdomains/final.txt
 #rm $url/subdomains/f.txt
@@ -148,49 +148,48 @@ mv $url/subdomains/temp-s.txt $url/subdomains/subdomains.txt
 subcount=$(wc -l $url/subdomains/subdomains.txt | awk '{print $1}')
 echo "    [*] Total No of Subdomains Identified: $subcount "
 
-#Perform Subdomain Takeover with Nuclei
-echo "[+] Performing Subdomain Takeover with Nuclei "
-cat $url/subdomains/subdomains.txt | nuclei -t subdomain-takeover/ -o $url/potential_takeovers/nuclei.txt -silent
-
-#Perform Subdomain Takeover
-echo "[+] Performing Subdomain Takeover with Subzy "
-subzy --targets=$url/subdomains/subdomains.txt --concurrency 25 --hide_fails --https > $url/potential_takeovers/subzy.txt
-
-#To Do: Print Only the vulnerable ones
-
-echo "[+] Performing Subdomain Takeover with Subjack "
-subjack -w $url/subdomains/subdomains.txt  -timeout 30 -ssl -c ~/go/src/github.com/haccer/subjack/fingerprints.json -v 3 -o $url/potential_takeovers/takeover.txt > $url/potential_takeovers/subjack.txt
-
-#Perform Subdomain Takeover
+#Probing Live Domains
 echo "[+] Probing for alive domains..."
-cat $url/subdomains/subdomains.txt | httpx -silent > $url/httpx/alive.txt
+cat $url/subdomains/subdomains.txt | httpx -threads 200 -silent > $url/httpx/alive.txt
 alivec=$(wc -l $url/httpx/alive.txt | awk '{print $1}')
 echo "    [*] Total No of Alive Subdomains Identified: $alivec "
 
-#Print Only the vulnerable ones
+#Perform Subdomain Takeover with Nuclei
+nuclei -update-templates -silent
+echo "[+] Performing Subdomain Takeover with Nuclei "
+cat $url/httpx/alive.txt | nuclei -t -c 200 subdomain-takeover/ -o $url/potential_takeovers/nuclei.txt -silent
+
+#Perform Subdomain Takeover with Subzy
+echo "[+] Performing Subdomain Takeover with Subzy "
+subzy --targets=$url/subdomains/subdomains.txt --concurrency 25 --hide_fails --https > $url/potential_takeovers/subzy.txt
+
+#Perform Subdomain Takeover with Subjack
+#To Do: Print Only the vulnerable ones
+echo "[+] Performing Subdomain Takeover with Subjack "
+subjack -w $url/subdomains/subdomains.txt  -timeout 30 -ssl -c ~/go/src/github.com/haccer/subjack/fingerprints.json -v 3 -o $url/potential_takeovers/takeover.txt > $url/potential_takeovers/subjack.txt
+
+
+#Performing Nuclei Scan
 echo "[+] Scanning for known CVE with Nuclei "
-cat $url/httpx/alive.txt | nuclei -t cves/ -o $url/nuclei/cve.txt -silent
-cat $url/httpx/alive.txt | nuclei -t vulnerabilities/ -o $url/nuclei/vulnerabilities.txt -silent
-cat $url/httpx/alive.txt | nuclei -t security-misconfiguration/ -o $url/nuclei/security-misconfiguration.txt -silent
-cat $url/httpx/alive.txt | nuclei -t default-credentials/ -o $url/nuclei/default-creds.txt -silent
-cat $url/httpx/alive.txt | nuclei -t tokens/ -o $url/nuclei/tokens.txt -silent
-cat $url/httpx/alive.txt | nuclei -t panels/ -o $url/nuclei/panels.txt -silent
-cat $url/httpx/alive.txt | nuclei -t fuzzing/ -o $url/nuclei/fuzz.txt -silent
-cat $url/httpx/alive.txt | nuclei -t files/ -o $url/nuclei/files.txt -silent
+cat $url/httpx/alive.txt | nuclei -c 200 -t cves/ -o $url/nuclei/cves.txt -silent
+cat $url/httpx/alive.txt | nuclei -c 200 -t vulnerabilities/ -o $url/nuclei/vulnerabilities.txt -silent
+cat $url/httpx/alive.txt | nuclei -c 200 -t security-misconfiguration/ -o $url/nuclei/security-misconfiguration.txt -silent
+cat $url/httpx/alive.txt | nuclei -c 200 -t default-credentials/ -o $url/nuclei/default-creds.txt -silent
+cat $url/httpx/alive.txt | nuclei -c 200 -t tokens/ -o $url/nuclei/tokens.txt -silent
+cat $url/httpx/alive.txt | nuclei -c 200 -t panels/ -o $url/nuclei/panels.txt -silent
+cat $url/httpx/alive.txt | nuclei -c 200 -t fuzzing/ -o $url/nuclei/fuzz.txt -silent
+cat $url/httpx/alive.txt | nuclei -c 200 -t files/ -o $url/nuclei/files.txt -silent
 
 #Run RustScan on all Alive Subdomains
 echo "[+] Performing Portscan on $alivec Alive Subdomains..."
 cat $url/httpx/alive.txt | sed 's/https\?:\/\///'  > $url/scans/nmap-temp.txt
 input="$url/scans/nmap-temp.txt"
-while IFS= read -r alivesubs
-do
-  rustscan --range 1-10000 $alivesubs --ulimit 5000 -- -n -sV -Pn -oN $url/scans/$alivesubs
-done < "$input"
+#while IFS= read -r alivesubs
+#do
+#  rustscan --range 1-10000 $alivesubs --ulimit 5000 -- -n -sV -Pn -oN $url/scans/$alivesubs
+#done < "$input"
 
-#==============================
-#Wayback Scan:
-#==============================
-
+# Performing Scans with Waybackurls:
 cd $url/wayback/
 
 rm -f allfiles.txt uniq_files.txt wayback_only_html.txt wayback_js_files.txt wayback_httprobe_file.txt wayback_json_files.txt important_http_urls.txt aws_s3_files.txt
@@ -199,9 +198,13 @@ echo "[+] Scrapping URLs from Wayback Machine"
 
 waybackurls $url >> allfiles.txt
 gau $url >> allfiles.txt
+#gospider -a -w -s "$url" >> gospider.txt
+#cat gospider.txt | awk
 
 #echo "Waybackurls extraction is complete!!"
 sort -ru allfiles.txt >> uniq_files.txt
+
+# Processing Waybackurls for sensitive keys/tokens
 grep -iv -E — '.js|.png|.jpg|.gif|.ico|.img|.css' uniq_files.txt >> wayback_only_html.txt
 cat uniq_files.txt | grep "\.js" | uniq | sort >> wayback_js_files.txt
 cat uniq_files.txt | grep "\.json" | uniq | sort >> wayback_json_files.txt
