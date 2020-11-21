@@ -168,30 +168,32 @@ probe_subdomains(){
 subdomain_takeover(){
 #Perform Subdomain Takeover with Nuclei
         nuclei -update-templates -silent
-        echo "[+] Performing Subdomain Takeover with Nuclei "
-        cat $url/httpx/alive.txt | nuclei -c 200 -t subdomain-takeover/ -o $url/potential_takeovers/nuclei.txt -silent
+        echo "[+] Performing Subdomain Takeover "
+        cat $url/httpx/alive.txt | nuclei -c 200 -t subdomain-takeover/ -o $url/potential_takeovers/nuclei.txt -silent  &
 
 #Perform Subdomain Takeover with Subzy
-        echo "[+] Performing Subdomain Takeover with Subzy "
-        subzy --targets=$url/subdomains/subdomains.txt --concurrency 25 --hide_fails --https > $url/potential_takeovers/subzy.txt
+        subzy --targets=$url/subdomains/subdomains.txt --concurrency 25 --hide_fails --https > $url/potential_takeovers/subzy.txt  &
 
 #Perform Subdomain Takeover with Subjack
 #To Do: Print Only the vulnerable ones
-        echo "[+] Performing Subdomain Takeover with Subjack "
-        subjack -w $url/subdomains/subdomains.txt  -timeout 30 -ssl -c ~/go/src/github.com/haccer/subjack/fingerprints.json -v 3 -o $url/potential_takeovers/takeover.txt > $url/potential_takeovers/subjack.txt
+        subjack -w $url/subdomains/subdomains.txt  -timeout 30 -ssl -c ~/go/src/github.com/haccer/subjack/fingerprints.json -v 3 -o $url/potential_takeovers/takeover.txt > $url/potential_takeovers/subjack.txt  &
+        wait
+        echo "[+] Subdomain Takeover Scan Completed "
 }
 
 #Performing Nuclei Scan
 nuclei_scan(){
         nuclei -update-templates -silent
         echo "[+] Scanning for known CVE with Nuclei "
-        cat $url/httpx/alive.txt | nuclei -c 200 -t cves/ -o $url/nuclei/cves.txt -silent
-        cat $url/httpx/alive.txt | nuclei -c 200 -t vulnerabilities/ -o $url/nuclei/vulnerabilities.txt -silent
-        cat $url/httpx/alive.txt | nuclei -c 200 -t security-misconfiguration/ -o $url/nuclei/security-misconfiguration.txt -silent
-        cat $url/httpx/alive.txt | nuclei -c 200 -t default-credentials/ -o $url/nuclei/default-creds.txt -silent
-        cat $url/httpx/alive.txt | nuclei -c 200 -t tokens/ -o $url/nuclei/tokens.txt -silent
-        cat $url/httpx/alive.txt | nuclei -c 200 -t panels/ -o $url/nuclei/panels.txt -silent
-        cat $url/httpx/alive.txt | nuclei -c 200 -t files/ -o $url/nuclei/files.txt -silent
+        cat $url/httpx/alive.txt | nuclei -c 200 -t cves/ -o $url/nuclei/cves.txt -silent &
+        cat $url/httpx/alive.txt | nuclei -c 200 -t vulnerabilities/ -o $url/nuclei/vulnerabilities.txt -silent &
+        cat $url/httpx/alive.txt | nuclei -c 200 -t security-misconfiguration/ -o $url/nuclei/security-misconfiguration.txt -silent &
+        cat $url/httpx/alive.txt | nuclei -c 200 -t default-credentials/ -o $url/nuclei/default-creds.txt -silent &
+        cat $url/httpx/alive.txt | nuclei -c 200 -t tokens/ -o $url/nuclei/tokens.txt -silent &
+        cat $url/httpx/alive.txt | nuclei -c 200 -t panels/ -o $url/nuclei/panels.txt -silent &
+        cat $url/httpx/alive.txt | nuclei -c 200 -t files/ -o $url/nuclei/files.txt -silent &
+        wait
+        echo "[+] Scanning with Nuclei Completed "
 }
 
 #Run RustScan on all Alive Subdomains
@@ -226,12 +228,13 @@ archieve_scan(){
 }
 
 find_subdomains(){
-        subdomain_chaos
-        subdomain_assetfinder
-        subdomain_findomain
-        subdomain_subfinder
+        subdomain_chaos &
+        subdomain_assetfinder &
+        subdomain_findomain &
+        subdomain_subfinder &
         #subdomain_amass
         #subdomain_ffufbrute
+        wait
         subdomain_merge
         probe_subdomains
         subdomain_takeover
@@ -240,7 +243,7 @@ find_subdomains(){
 find_subdomains
 nuclei_scan
 portscan_scan
-archieve_scan
+#archieve_scan
 
 echo "-------------------------------"
 echo " [-]--- Recon Completed ---[-]"
