@@ -1,5 +1,8 @@
 #!/bin/bash
 
+
+# Pending tool list
+#Chaos Findomain Nuclei-templates pending
 #Install GoLang
 wget -q -O - https://git.io/vQhTU | bash
 sudo apt-get install jq grepcidr brutespray amass git nmap tmux screen -y 
