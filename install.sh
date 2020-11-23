@@ -2,10 +2,11 @@
 
 
 # Pending tool list
-#Chaos Findomain Nuclei-templates pending
+#Chaos Findomain Nuclei-templates Subzy
 #Install GoLang
+
 wget -q -O - https://git.io/vQhTU | bash
-sudo apt-get install jq grepcidr brutespray amass git nmap tmux screen -y 
+sudo apt-get install jq python python3 python3-pip grepcidr brutespray amass git nmap tmux screen -y 
 
 pip install shodan
 
@@ -14,6 +15,15 @@ GO111MODULE=on go get -u -v github.com/projectdiscovery/subfinder/v2/cmd/subfind
 
 #assetfinder
 go get -u github.com/tomnomnom/assetfinder
+
+#chaos
+GO111MODULE=on go get -u github.com/projectdiscovery/chaos-client/cmd/chaos
+
+#findomain
+wget https://github.com/Edu4rdSHL/findomain/releases/latest/download/findomain-linux
+mv findomain-linux findomain
+chmod +x findomain
+mv findomain /usr/bin/
 
 #zcat
 #goaltdns
@@ -68,12 +78,6 @@ go get -u github.com/hahwul/dalfox
 
 #Nuclei-Templates
 git clone https://github.com/projectdiscovery/nuclei-templates.git -o ~/
-
-#zdns
-git clone https://github.com/zmap/zdns.git
-cd zdns
-go build
-cd ..
 
 
 # Install GF Pattern
