@@ -132,6 +132,21 @@ subdomain_subfinder(){
         echo "    [-] Subdomains Found with Subfinder: $subcount "
 }
 
+subdomain_misc(){
+#Bufferover
+curl -s https://dns.bufferover.run/dns?q=.$url |jq -r .FDNS_A[]|cut -d',' -f2|sort -u >> $url/subdomains/misc-subs.txt
+
+#Riddler.io
+curl -s "https://riddler.io/search/exportcsv?q=pld:$url" | grep -Po "(([\w.-]*)\.([\w]*)\.([A-z]))\w+" | sort -u >> $url/subdomains/misc-subs.txt
+
+curl -s "https://www.virustotal.com/ui/domains/$url/subdomains?limit=40" | grep -Po "((http|https):\/\/)?(([\w.-]*)\.([\w]*)\.([A-z]))\w+" | sort -u >> $url/subdomains/misc-subs.txt
+
+curl -s "http://web.archive.org/cdx/search/cdx?url=*.$url/*&output=text&fl=original&collapse=urlkey" | sed -e 's_https*://__' -e "s/\/.*//" | sort -u >> $url/subdomains/misc-subs.txt
+
+curl -s "https://rapiddns.io/subdomain/$url?full=1#result" | grep "<td><a" | cut -d '"' -f 2 | grep http | cut -d '/' -f3 | sed 's/#results//g' | sort -u >> $url/subdomains/misc-subs.txt
+
+}
+
 #Run Amass
 subdomain_amass(){
         echo "[+] Harvesting subdomains with Amass..."
@@ -232,6 +247,7 @@ find_subdomains(){
         subdomain_assetfinder &
         subdomain_findomain &
         subdomain_subfinder &
+        subdomain_misc &
         #subdomain_amass
         #subdomain_ffufbrute
         wait
