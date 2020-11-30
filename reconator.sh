@@ -133,6 +133,33 @@ subdomain_subfinder(){
 }
 
 subdomain_misc(){
+
+#SubMisc-Code
+curl --silent https://www.threatcrowd.org/searchApi/v2/domain/report/?domain=$url | grep -o -E "[a-zA-Z0-9._-]+\.$1" > tmp.txt
+curl --silent https://api.hackertarget.com/hostsearch/?q=$1 | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent https://crt.sh/?q=%.$1  | grep -oP "\<TD\>\K.*\.$1" | sed -e 's/\<BR\>/\n/g' | grep -oP "\K.*\.$1" | sed -e 's/[\<|\>]//g' | grep -o -E "[a-zA-Z0-9._-]+\.$1"  >> tmp.txt
+curl --silent https://crt.sh/?q=%.%.$1 | grep -oP "\<TD\>\K.*\.$1" | sed -e 's/\<BR\>/\n/g' | sed -e 's/[\<|\>]//g' | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent https://crt.sh/?q=%.%.%.$1 | grep "$1" | cut -d '>' -f2 | cut -d '<' -f1 | grep -v " " | grep -o -E "[a-zA-Z0-9._-]+\.$1" | sort -u >> tmp.txt
+curl --silent https://crt.sh/?q=%.%.%.%.$1 | grep "$1" | cut -d '>' -f2 | cut -d '<' -f1 | grep -v " " | grep -o -E "[a-zA-Z0-9._-]+\.$1" |  sort -u >> tmp.txt
+curl --silent https://certspotter.com/api/v0/certs?domain=$1 | grep  -o '\[\".*\"\]' | sed -e 's/\[//g' | sed -e 's/\"//g' | sed -e 's/\]//g' | sed -e 's/\,/\n/g' | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent https://spyse.com/target/domain/$1 | grep -E -o "button.*>.*\.$1\/button>" |  grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent https://tls.bufferover.run/dns?q=$1 | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent https://dns.bufferover.run/dns?q=.$1 | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent https://urlscan.io/api/v1/search/?q=$1 | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent -X POST https://synapsint.com/report.php -d "name=http%3A%2F%2F$1" | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent https://jldc.me/anubis/subdomains/$1 | grep -Po "((http|https):\/\/)?(([\w.-]*)\.([\w]*)\.([A-z]))\w+" >> tmp.txt
+curl --silent https://sonar.omnisint.io/subdomains/$1 | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent https://otx.alienvault.com/api/v1/indicators/domain/$1/passive_dns | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+curl --silent https://riddler.io/search/exportcsv?q=pld:$1 | grep -o -E "[a-zA-Z0-9._-]+\.$1" >> tmp.txt
+
+if [[ $# -eq 2 ]]; then
+    cat tmp.txt | sed -e "s/\*\.$1//g" | sed -e "s/^\..*//g" | grep -o -E "[a-zA-Z0-9._-]+\.$1" | sort -u > $2
+else
+    cat tmp.txt | sed -e "s/\*\.$1//g" | sed -e "s/^\..*//g" | grep -o -E "[a-zA-Z0-9._-]+\.$1" | sort -u
+fi
+rm -f tmp.txt
+#End of SubMis Code
+
 #Bufferover
 curl -s https://dns.bufferover.run/dns?q=.$url |jq -r .FDNS_A[]|cut -d',' -f2|sort -u >> $url/subdomains/misc-subs.txt
 
@@ -200,13 +227,13 @@ subdomain_takeover(){
 nuclei_scan(){
         nuclei -update-templates -silent
         echo "[+] Scanning for known CVE with Nuclei "
-        cat $url/httpx/alive.txt | nuclei -c 200 -t cves/ -o $url/nuclei/cves.txt -silent &
-        cat $url/httpx/alive.txt | nuclei -c 200 -t vulnerabilities/ -o $url/nuclei/vulnerabilities.txt -silent &
-        cat $url/httpx/alive.txt | nuclei -c 200 -t security-misconfiguration/ -o $url/nuclei/security-misconfiguration.txt -silent &
-        cat $url/httpx/alive.txt | nuclei -c 200 -t default-credentials/ -o $url/nuclei/default-creds.txt -silent &
-        cat $url/httpx/alive.txt | nuclei -c 200 -t tokens/ -o $url/nuclei/tokens.txt -silent &
-        cat $url/httpx/alive.txt | nuclei -c 200 -t panels/ -o $url/nuclei/panels.txt -silent &
-        cat $url/httpx/alive.txt | nuclei -c 200 -t files/ -o $url/nuclei/files.txt -silent &
+        cat $url/httpx/alive.txt | nuclei -c 200 -t cves/ -o $url/nuclei/cves.txt -silent 
+        cat $url/httpx/alive.txt | nuclei -c 200 -t vulnerabilities/ -o $url/nuclei/vulnerabilities.txt -silent 
+        cat $url/httpx/alive.txt | nuclei -c 200 -t security-misconfiguration/ -o $url/nuclei/security-misconfiguration.txt -silent 
+        cat $url/httpx/alive.txt | nuclei -c 200 -t default-credentials/ -o $url/nuclei/default-creds.txt -silent 
+        cat $url/httpx/alive.txt | nuclei -c 200 -t tokens/ -o $url/nuclei/tokens.txt -silent 
+        cat $url/httpx/alive.txt | nuclei -c 200 -t panels/ -o $url/nuclei/panels.txt -silent 
+        cat $url/httpx/alive.txt | nuclei -c 200 -t files/ -o $url/nuclei/files.txt -silent 
         wait
         echo "[+] Scanning with Nuclei Completed "
 }
