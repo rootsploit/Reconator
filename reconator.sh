@@ -16,6 +16,9 @@ Methodology:
 To-Do:
 1.Shodan Censys API implementation
 2.Rustscan or PD Scan on ports
+3.Project Sonar IP List
+4.CloudFlare Detection
+
 12 secs with Nmap and service version:
 rustscan scanme.nmap.org --ulimit 5000 -- -n -sV -Pn 
 20 secs without Nmap
