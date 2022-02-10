@@ -116,7 +116,7 @@ subdomain_assetfinder(){
 #Run Findomain
 subdomain_findomain(){
         echo "[+] Harvesting subdomains with Findomain..."
-        ~/./tools/findomain -t $url --threads 25 -u $url/subdomains/findomain.txt >> /dev/null
+        findomain -t $url --threads 25 -u $url/subdomains/findomain.txt >> /dev/null 2>&1
         uniq $url/subdomains/findomain.txt > $url/subdomains/f-temp.txt
         sort $url/subdomains/f-temp.txt > $url/subdomains/findomain.txt
         rm $url/subdomains/f-temp.txt
