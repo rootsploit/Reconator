@@ -23,11 +23,11 @@ GO111MODULE=on go get -u github.com/projectdiscovery/chaos-client/cmd/chaos
 wget https://github.com/Edu4rdSHL/findomain/releases/latest/download/findomain-linux
 mv findomain-linux findomain
 chmod +x findomain
-mv findomain /usr/bin/
+sudo mv findomain /usr/bin/
 
 #zcat
 #goaltdns
-go get github.com/subfinder/goaltdns
+go install -v github.com/subfinder/goaltdns@latest
 
 #shuffledns
 GO111MODULE=on go get -u -v github.com/projectdiscovery/shuffledns/cmd/shuffledns
@@ -56,25 +56,25 @@ go get github.com/haccer/subjack
 #aquatone
 
 #webanalyze
-go get -v -u github.com/rverton/webanalyze/cmd/webanalyze
+go install -v github.com/rverton/webanalyze/cmd/webanalyze@latest
 
 #gau
 GO111MODULE=on go get -u -v github.com/lc/gau
 
 #getching
-go get -u github.com/phspade/getching
+go install -v github.com/phspade/getching@latest
 
 #kxss
-go get github.com/Emoe/kxss
+go install -v github.com/Emoe/kxss@latest
 
 #Waybackurls
-go get github.com/tomnomnom/waybackurls
+go install -v github.com/tomnomnom/waybackurls@latest
 
 # Install QSReplace
-go get -u github.com/tomnomnom/qsreplace
+go install -v github.com/tomnomnom/qsreplace@latest
 
 #dalfox
-go get -u github.com/hahwul/dalfox
+go install -v github.com/hahwul/dalfox@latest
 
 #Nuclei-Templates
 git clone https://github.com/projectdiscovery/nuclei-templates.git -o ~/
