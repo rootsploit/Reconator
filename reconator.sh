@@ -188,7 +188,7 @@ subdomain_amass(){
 #Bruteforce Subdomains
 subdomain_ffufbrute(){
         echo "[+] Bruteforcing Subdomains with FFuF..."
-        ffuf -w wordlists/subdomains.txt -u "https://FUZZ.$url/" -v | grep "| $url |" | awk '{print $4}'
+        ffuf -w wordlists/subdomains.txt -u "https://FUZZ.$url/" -v | grep $url | awk '{print $4}'
 }
 
 #Combine Subdomains
