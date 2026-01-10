@@ -68,18 +68,52 @@ func GetWordlists() []Wordlist {
 		{
 			Name:        "Subdomain Bruteforce (20k)",
 			Filename:    "subdomain-bruteforce-medium.txt",
-			URL:         "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-20000.txt",
+			URL:         "https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/DNS/subdomains-top1million-20000.txt",
 			Description: "SecLists top 20k subdomains",
 			Required:    true,
 		},
 		{
 			Name:        "Subdomain Bruteforce (5k)",
 			Filename:    "subdomain-bruteforce.txt",
-			URL:         "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt",
+			URL:         "https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/DNS/subdomains-top1million-5000.txt",
 			Description: "SecLists top 5k subdomains (quick)",
 			Required:    false,
 		},
+		{
+			Name:        "Directory Bruteforce",
+			Filename:    "directory-list-2.3-small.txt",
+			URL:         "https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt",
+			Description: "SecLists directory bruteforce wordlist",
+			Required:    true,
+		},
 	}
+}
+
+// FindDirBruteWordlist finds the first available directory bruteforce wordlist
+func FindDirBruteWordlist() string {
+	home, _ := os.UserHomeDir()
+	paths := []string{
+		// Reconator installed wordlists (highest priority)
+		filepath.Join(WordlistDir(), "directory-list-2.3-small.txt"),
+		// SecLists locations (new naming with DirBuster prefix)
+		"/usr/share/seclists/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt",
+		"/usr/share/wordlists/seclists/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt",
+		"/opt/seclists/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt",
+		filepath.Join(home, "SecLists/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt"),
+		// Legacy SecLists locations (old naming)
+		"/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-small.txt",
+		"/usr/share/wordlists/seclists/Discovery/Web-Content/directory-list-2.3-small.txt",
+		filepath.Join(home, "SecLists/Discovery/Web-Content/directory-list-2.3-small.txt"),
+		// Kali default
+		"/usr/share/wordlists/dirb/common.txt",
+		"/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 // DownloadWordlist downloads a wordlist to the wordlists directory

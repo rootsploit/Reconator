@@ -16,6 +16,7 @@ type Result struct {
 	CDNHosts     []string          `json:"cdn_hosts"`
 	DirectHosts  []string          `json:"direct_hosts"`
 	CDNDetails   map[string]string `json:"cdn_details"`
+	OriginIPs    map[string]string `json:"origin_ips,omitempty"` // Discovered origin IPs for CF hosts
 	Duration     time.Duration     `json:"duration"`
 }
 
@@ -45,6 +46,7 @@ func (d *Detector) Detect(hosts []string) (*Result, error) {
 		CDNHosts:     []string{},
 		DirectHosts:  []string{},
 		CDNDetails:   make(map[string]string),
+		OriginIPs:    make(map[string]string),
 	}
 
 	if !d.c.IsInstalled("cdncheck") {
@@ -96,8 +98,6 @@ func (d *Detector) Detect(hosts []string) (*Result, error) {
 		}
 	}
 
-	result.Duration = time.Since(start)
-
 	// Print provider summary
 	counts := make(map[string]int)
 	for _, p := range result.CDNDetails {
@@ -107,7 +107,107 @@ func (d *Detector) Detect(hosts []string) (*Result, error) {
 		fmt.Printf("        %s: %d hosts\n", p, c)
 	}
 
+	// Attempt origin IP discovery for Cloudflare hosts
+	cfHosts := d.filterCloudflareHosts(result.CDNHosts, result.CDNDetails)
+	if len(cfHosts) > 0 {
+		fmt.Printf("    [*] Attempting origin IP discovery for %d Cloudflare hosts...\n", len(cfHosts))
+		origins := d.discoverOriginIPs(cfHosts)
+		for host, ip := range origins {
+			result.OriginIPs[host] = ip
+		}
+		if len(origins) > 0 {
+			fmt.Printf("        Discovered %d origin IPs\n", len(origins))
+		}
+	}
+
+	result.Duration = time.Since(start)
 	return result, nil
+}
+
+// filterCloudflareHosts returns only Cloudflare-protected hosts
+func (d *Detector) filterCloudflareHosts(cdnHosts []string, cdnDetails map[string]string) []string {
+	var cfHosts []string
+	for _, host := range cdnHosts {
+		provider := strings.ToLower(cdnDetails[host])
+		if strings.Contains(provider, "cloudflare") {
+			cfHosts = append(cfHosts, host)
+		}
+	}
+	return cfHosts
+}
+
+// discoverOriginIPs attempts to find origin IPs behind Cloudflare using multiple methods
+func (d *Detector) discoverOriginIPs(hosts []string) map[string]string {
+	origins := make(map[string]string)
+
+	if len(hosts) == 0 {
+		return origins
+	}
+
+	tmp, cleanup, err := exec.TempFile(strings.Join(hosts, "\n"), "-cf-hosts.txt")
+	if err != nil {
+		return origins
+	}
+	defer cleanup()
+
+	// Try CF-Hero first (comprehensive - uses SecurityTrails, Censys, Shodan, etc.)
+	if d.c.IsInstalled("cf-hero") {
+		fmt.Println("        Running cf-hero...")
+		r := exec.Run("cf-hero", []string{"-f", tmp}, &exec.Options{Timeout: 5 * time.Minute})
+		if r.Error == nil {
+			for _, line := range exec.Lines(r.Stdout) {
+				// Parse cf-hero output: host -> origin_ip
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					host := strings.TrimSpace(parts[0])
+					ip := strings.TrimSpace(parts[len(parts)-1])
+					if isValidIP(ip) && host != "" {
+						origins[host] = ip
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback to hakoriginfinder (doesn't need API keys)
+	if len(origins) < len(hosts) && d.c.IsInstalled("hakoriginfinder") {
+		fmt.Println("        Running hakoriginfinder...")
+		r := exec.Run("hakoriginfinder", []string{"-f", tmp}, &exec.Options{Timeout: 3 * time.Minute})
+		if r.Error == nil {
+			for _, line := range exec.Lines(r.Stdout) {
+				// Parse hakoriginfinder output
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					host := strings.TrimSpace(parts[0])
+					ip := strings.TrimSpace(parts[len(parts)-1])
+					if isValidIP(ip) && host != "" && origins[host] == "" {
+						origins[host] = ip
+					}
+				}
+			}
+		}
+	}
+
+	return origins
+}
+
+// isValidIP checks if string is a valid IPv4 address
+func isValidIP(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts {
+		if len(p) == 0 || len(p) > 3 {
+			return false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func coalesce(vals ...string) string {

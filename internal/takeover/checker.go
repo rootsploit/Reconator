@@ -3,6 +3,7 @@ package takeover
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -82,6 +83,21 @@ func (c *Checker) Check(subdomains []string) (*Result, error) {
 		fmt.Printf("        subzy: %d potential takeovers\n", len(vulns))
 	}()
 
+	// Subjack
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if !c.c.IsInstalled("subjack") {
+			return
+		}
+		fmt.Println("        Running subjack...")
+		vulns := c.subjack(tmp)
+		mu.Lock()
+		result.Vulnerable = append(result.Vulnerable, vulns...)
+		mu.Unlock()
+		fmt.Printf("        subjack: %d potential takeovers\n", len(vulns))
+	}()
+
 	wg.Wait()
 
 	// Dedupe by subdomain+service+tool (not just subdomain)
@@ -101,14 +117,36 @@ func (c *Checker) Check(subdomains []string) (*Result, error) {
 
 func (c *Checker) nuclei(input string) []Vulnerable {
 	var vulns []Vulnerable
-	// Use nuclei tags for takeover detection - covers both subdomain and DNS takeovers
-	// Tags: takeover (general), dns (DNS specific), cname (CNAME takeovers)
+
+	// Get home directory for nuclei-templates path
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return vulns
+	}
+	templateDir := home + "/nuclei-templates"
+
+	// Build args for takeover detection
 	args := []string{
 		"-l", input,
-		"-tags", "takeover",
 		"-severity", "critical,high,medium",
 		"-silent", "-json",
 	}
+
+	// Check if templates directory exists at ~/nuclei-templates
+	takeoverDir := templateDir + "/http/takeovers/"
+	if _, err := os.Stat(takeoverDir); err == nil {
+		// Use http/takeovers directory (primary takeover templates)
+		args = append(args, "-t", takeoverDir)
+		// Also add DNS takeover detection templates if they exist
+		dnsDir := templateDir + "/dns/"
+		if _, err := os.Stat(dnsDir); err == nil {
+			args = append(args, "-t", dnsDir)
+		}
+	} else {
+		// Fallback: use tags-based filtering
+		args = append(args, "-tags", "takeover")
+	}
+
 	if c.cfg.Threads > 0 {
 		args = append(args, "-c", fmt.Sprintf("%d", c.cfg.Threads))
 	}
@@ -174,6 +212,56 @@ func (c *Checker) subzy(input string) []Vulnerable {
 				Service:   service,
 				Severity:  "high",
 				Tool:      "subzy",
+				Details:   line,
+			})
+		}
+	}
+	return vulns
+}
+
+func (c *Checker) subjack(input string) []Vulnerable {
+	var vulns []Vulnerable
+
+	// subjack -w subdomains.txt -timeout 30 -ssl -v
+	args := []string{"-w", input, "-timeout", "30", "-ssl", "-v"}
+	if c.cfg.Threads > 0 {
+		args = append(args, "-t", fmt.Sprintf("%d", c.cfg.Threads))
+	}
+	r := exec.Run("subjack", args, &exec.Options{Timeout: 10 * time.Minute})
+
+	if r.Error != nil {
+		return vulns
+	}
+
+	// Parse output - subjack outputs vulnerable subdomains
+	// Format: [subdomain] is vulnerable to [service]
+	for _, line := range exec.Lines(r.Stdout) {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip non-vulnerable lines
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "vulnerable") && !strings.Contains(lower, "takeover") {
+			continue
+		}
+		// Extract subdomain (usually in brackets or first field)
+		parts := strings.Fields(line)
+		if len(parts) >= 1 {
+			sub := strings.Trim(parts[0], "[]")
+			if !strings.Contains(sub, ".") {
+				continue
+			}
+			service := ""
+			// Try to extract service name
+			if idx := strings.Index(lower, "vulnerable to"); idx != -1 {
+				service = strings.TrimSpace(line[idx+len("vulnerable to"):])
+			}
+			vulns = append(vulns, Vulnerable{
+				Subdomain: sub,
+				Service:   service,
+				Severity:  "high",
+				Tool:      "subjack",
 				Details:   line,
 			})
 		}

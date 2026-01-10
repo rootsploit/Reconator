@@ -14,12 +14,29 @@ import (
 )
 
 type Result struct {
-	Domain              string         `json:"domain"`
-	URLs                []string       `json:"urls"`
-	ExtractedSubdomains []string       `json:"extracted_subdomains"` // Subdomains extracted from URLs
-	Total               int            `json:"total"`
-	Sources             map[string]int `json:"sources"`
-	Duration            time.Duration  `json:"duration"`
+	Domain              string            `json:"domain"`
+	URLs                []string          `json:"urls"`
+	ExtractedSubdomains []string          `json:"extracted_subdomains"` // Subdomains extracted from URLs
+	Total               int               `json:"total"`
+	Sources             map[string]int    `json:"sources"`
+	Duration            time.Duration     `json:"duration"`
+	// Categorized URLs for vulnerability scanning
+	Categorized CategorizedURLs `json:"categorized,omitempty"`
+}
+
+// CategorizedURLs holds URLs filtered by potential vulnerability type
+type CategorizedURLs struct {
+	XSS       []string `json:"xss,omitempty"`
+	SQLi      []string `json:"sqli,omitempty"`
+	SSRF      []string `json:"ssrf,omitempty"`
+	LFI       []string `json:"lfi,omitempty"`
+	RCE       []string `json:"rce,omitempty"`
+	SSTI      []string `json:"ssti,omitempty"`
+	Redirect  []string `json:"redirect,omitempty"`
+	Debug     []string `json:"debug,omitempty"`
+	JSFiles   []string `json:"js_files,omitempty"`
+	APIFiles  []string `json:"api_files,omitempty"`
+	Sensitive []string `json:"sensitive,omitempty"` // admin, auth, api, etc.
 }
 
 type Collector struct {
@@ -47,7 +64,16 @@ func (c *Collector) Collect(domain string, aliveHosts []string) (*Result, error)
 		{"gau", c.gau},
 	}
 
-	if len(aliveHosts) > 0 && c.c.IsInstalled("katana") {
+	// urlfinder is passive (queries archives) - always use it
+	if c.c.IsInstalled("urlfinder") {
+		tools = append(tools, struct {
+			name string
+			fn   func(string) []string
+		}{"urlfinder", c.urlfinder})
+	}
+
+	// katana is active (crawls websites) - skip in passive mode
+	if !c.cfg.PassiveMode && len(aliveHosts) > 0 && c.c.IsInstalled("katana") {
 		tools = append(tools, struct {
 			name string
 			fn   func(string) []string
@@ -62,6 +88,9 @@ func (c *Collector) Collect(domain string, aliveHosts []string) (*Result, error)
 	}
 
 	fmt.Println("    [*] Collecting historic URLs...")
+	if c.cfg.PassiveMode {
+		fmt.Println("    [PASSIVE] Using passive sources only (skipping katana)")
+	}
 
 	for _, t := range tools {
 		wg.Add(1)
@@ -95,6 +124,14 @@ func (c *Collector) Collect(domain string, aliveHosts []string) (*Result, error)
 	result.URLs = all
 	result.ExtractedSubdomains = extractedSubs
 	result.Total = len(all)
+
+	// Categorize URLs for vulnerability scanning
+	result.Categorized = c.CategorizeURLs(all)
+	fmt.Printf("        categorized: XSS=%d SQLi=%d SSRF=%d LFI=%d JS=%d Sensitive=%d\n",
+		len(result.Categorized.XSS), len(result.Categorized.SQLi),
+		len(result.Categorized.SSRF), len(result.Categorized.LFI),
+		len(result.Categorized.JSFiles), len(result.Categorized.Sensitive))
+
 	result.Duration = time.Since(start)
 	return result, nil
 }
@@ -121,6 +158,19 @@ func (c *Collector) gau(domain string) []string {
 	return filterURLs(r.Stdout)
 }
 
+func (c *Collector) urlfinder(domain string) []string {
+	if !c.c.IsInstalled("urlfinder") {
+		return nil
+	}
+	// urlfinder queries passive sources (wayback, commoncrawl, etc.) - no active crawling
+	args := []string{"-d", domain, "-silent", "-all"}
+	r := exec.Run("urlfinder", args, &exec.Options{Timeout: 5 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+	return filterURLs(r.Stdout)
+}
+
 func (c *Collector) katana(hosts []string) []string {
 	if !c.c.IsInstalled("katana") || len(hosts) == 0 {
 		return nil
@@ -141,6 +191,16 @@ func (c *Collector) katana(hosts []string) []string {
 		return nil
 	}
 	return filterURLs(r.Stdout)
+}
+
+// RunKatana is a public method to run katana crawling on alive hosts
+// Called separately after port scanning provides alive hosts
+func (c *Collector) RunKatana(aliveHosts []string) []string {
+	if !c.c.IsInstalled("katana") || len(aliveHosts) == 0 {
+		return nil
+	}
+	fmt.Println("    [*] Running katana (active crawling)...")
+	return c.katana(aliveHosts)
 }
 
 func (c *Collector) waymore(domain string) []string {
@@ -233,4 +293,173 @@ func ExtractEndpoints(urls []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// CategorizeURLs categorizes URLs based on gf-like patterns for vulnerability scanning
+func (c *Collector) CategorizeURLs(urls []string) CategorizedURLs {
+	cat := CategorizedURLs{}
+
+	// Use gf tool if available for better pattern matching
+	if c.c.IsInstalled("gf") {
+		cat.XSS = c.runGF(urls, "xss")
+		cat.SQLi = c.runGF(urls, "sqli")
+		cat.SSRF = c.runGF(urls, "ssrf")
+		cat.LFI = c.runGF(urls, "lfi")
+		cat.RCE = c.runGF(urls, "rce")
+		cat.SSTI = c.runGF(urls, "ssti")
+		cat.Redirect = c.runGF(urls, "redirect")
+		cat.Debug = c.runGF(urls, "debug_logic")
+	} else {
+		// Fallback to built-in pattern matching
+		cat.XSS = filterByPatterns(urls, xssPatterns)
+		cat.SQLi = filterByPatterns(urls, sqliPatterns)
+		cat.SSRF = filterByPatterns(urls, ssrfPatterns)
+		cat.LFI = filterByPatterns(urls, lfiPatterns)
+		cat.RCE = filterByPatterns(urls, rcePatterns)
+		cat.SSTI = filterByPatterns(urls, sstiPatterns)
+		cat.Redirect = filterByPatterns(urls, redirectPatterns)
+		cat.Debug = filterByPatterns(urls, debugPatterns)
+	}
+
+	// These don't need gf - simple file extension/path matching
+	cat.JSFiles = filterByExtensions(urls, []string{".js", ".mjs"})
+	cat.APIFiles = filterByPatterns(urls, apiPatterns)
+	cat.Sensitive = filterByPatterns(urls, sensitivePatterns)
+
+	return cat
+}
+
+// runGF runs gf with a specific pattern
+func (c *Collector) runGF(urls []string, pattern string) []string {
+	if len(urls) == 0 {
+		return nil
+	}
+
+	tmp, cleanup, err := exec.TempFile(strings.Join(urls, "\n"), "-urls.txt")
+	if err != nil {
+		return nil
+	}
+	defer cleanup()
+
+	// cat urls.txt | gf pattern
+	r := exec.Run("sh", []string{"-c", fmt.Sprintf("cat %s | gf %s", tmp, pattern)}, &exec.Options{Timeout: 1 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+
+	var results []string
+	for _, line := range exec.Lines(r.Stdout) {
+		if line != "" {
+			results = append(results, line)
+		}
+	}
+	return results
+}
+
+// Pattern definitions for built-in matching (fallback when gf not installed)
+var xssPatterns = []string{
+	"q=", "s=", "search=", "query=", "keyword=", "lang=", "id=",
+	"page=", "view=", "name=", "content=", "message=", "comment=",
+	"url=", "redirect=", "rurl=", "return=", "next=", "dest=",
+	"callback=", "jsonp=", "html=", "text=", "body=", "title=",
+}
+
+var sqliPatterns = []string{
+	"id=", "page=", "cat=", "category=", "item=", "product=",
+	"pid=", "uid=", "user=", "order=", "sort=", "num=", "type=",
+	"select=", "from=", "where=", "table=", "column=", "report=",
+}
+
+var ssrfPatterns = []string{
+	"url=", "uri=", "path=", "dest=", "redirect=", "target=",
+	"fetch=", "file=", "document=", "domain=", "host=", "site=",
+	"proxy=", "remote=", "load=", "download=", "img=", "image=",
+	"source=", "src=", "href=", "link=", "callback=", "return=",
+}
+
+var lfiPatterns = []string{
+	"file=", "document=", "folder=", "root=", "path=", "pg=",
+	"style=", "pdf=", "template=", "php_path=", "doc=", "page=",
+	"name=", "cat=", "dir=", "action=", "board=", "date=",
+	"detail=", "download=", "inc=", "include=", "locate=",
+}
+
+var rcePatterns = []string{
+	"cmd=", "exec=", "command=", "execute=", "ping=", "query=",
+	"code=", "reg=", "do=", "func=", "arg=", "option=", "load=",
+	"process=", "step=", "read=", "function=", "req=", "feature=",
+	"email=", "daemon=", "upload=", "dir=", "log=", "ip=", "cli=",
+}
+
+var sstiPatterns = []string{
+	"template=", "page=", "id=", "name=", "content=", "view=",
+	"msg=", "message=", "text=", "render=", "preview=", "email=",
+}
+
+var redirectPatterns = []string{
+	"next=", "url=", "target=", "rurl=", "dest=", "destination=",
+	"redir=", "redirect_uri=", "redirect_url=", "redirect=",
+	"out=", "view=", "to=", "image_url=", "go=", "return=",
+	"returnTo=", "return_to=", "checkout_url=", "continue=",
+	"return_path=", "success=", "data=", "reference=", "site=",
+}
+
+var debugPatterns = []string{
+	"debug=", "test=", "admin=", "mode=", "env=", "dev=",
+	"trace=", "log=", "verbose=", "level=",
+}
+
+var apiPatterns = []string{
+	"/api/", "/v1/", "/v2/", "/v3/", "/rest/", "/graphql",
+	".json", ".xml", "/swagger", "/openapi", "/oauth",
+}
+
+var sensitivePatterns = []string{
+	"/admin", "/login", "/auth", "/config", "/debug", "/backup",
+	"/db", "/database", "/phpmyadmin", "/wp-admin", "/dashboard",
+	"/console", "/manage", "/management", "/api/", "/internal",
+	".env", ".git", ".svn", ".htaccess", ".htpasswd", "web.config",
+}
+
+// filterByPatterns filters URLs containing any of the given patterns
+func filterByPatterns(urls []string, patterns []string) []string {
+	seen := make(map[string]bool)
+	var results []string
+	for _, u := range urls {
+		lower := strings.ToLower(u)
+		for _, p := range patterns {
+			if strings.Contains(lower, p) {
+				if !seen[u] {
+					seen[u] = true
+					results = append(results, u)
+				}
+				break
+			}
+		}
+	}
+	return results
+}
+
+// filterByExtensions filters URLs by file extension
+func filterByExtensions(urls []string, extensions []string) []string {
+	seen := make(map[string]bool)
+	var results []string
+	for _, u := range urls {
+		// Remove query string
+		path := u
+		if idx := strings.Index(u, "?"); idx > 0 {
+			path = u[:idx]
+		}
+		lower := strings.ToLower(path)
+		for _, ext := range extensions {
+			if strings.HasSuffix(lower, ext) {
+				if !seen[u] {
+					seen[u] = true
+					results = append(results, u)
+				}
+				break
+			}
+		}
+	}
+	return results
 }

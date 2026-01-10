@@ -18,16 +18,33 @@ type Config struct {
 	DNSThreads int // Separate threads for DNS operations (puredns, dnsx)
 	RateLimit  int
 
-	// Stealth options
-	StealthMode bool // Skip DNS bruteforce, permutations, scan only direct hosts
+	// Passive mode - no active scanning
+	PassiveMode bool // Only passive recon: no port scanning, no katana crawling, no wappalyzer
 
-	// Speed options
-	FastMode bool // Skip alterx, limit permutations for faster scans
+	// Favicon hash for favirecon
+	FaviconHash string
 
 	// Tool options
 	UseOptional   bool
 	ResolversFile string
 	WordlistFile  string
+
+	// AI API keys (for AI-guided nuclei template selection)
+	OpenAIKey string
+	ClaudeKey string
+	GeminiKey string
+
+	// Alerting
+	NotifyConfigPath string // Path to notify provider config
+	EnableNotify     bool   // Enable notifications
+
+	// Phase-specific options
+	SkipDirBrute   bool // Skip directory bruteforce
+	SkipVulnScan   bool // Skip vulnerability scanning
+	SkipAIGuided   bool // Skip AI-guided scanning
+
+	// Debug
+	Debug bool // Show detailed timing logs for each tool execution
 }
 
 // DefaultConfig returns a configuration with default values

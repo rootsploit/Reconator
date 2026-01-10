@@ -27,6 +27,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 
 	checker := tools.NewChecker()
 	status := checker.CheckAll()
+	goTools := tools.GoTools()
 
 	// Required Go tools
 	fmt.Println("Required Go Tools:")
@@ -34,7 +35,10 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	requiredCount := 0
 	requiredInstalled := 0
 
-	for _, tool := range status.Go {
+	for i, tool := range status.Go {
+		if !goTools[i].Required {
+			continue
+		}
 		requiredCount++
 		fmt.Printf("  %-15s ", tool.Name)
 		if tool.Installed {
@@ -46,6 +50,30 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			fmt.Println()
 		} else {
 			red.Println("✗ not found")
+		}
+	}
+
+	// Optional Go tools
+	fmt.Println("\nOptional Go Tools:")
+	fmt.Println("─────────────────────────────────────────────────────")
+	optionalGoCount := 0
+	optionalGoInstalled := 0
+
+	for i, tool := range status.Go {
+		if goTools[i].Required {
+			continue
+		}
+		optionalGoCount++
+		fmt.Printf("  %-15s ", tool.Name)
+		if tool.Installed {
+			optionalGoInstalled++
+			green.Printf("✓ installed")
+			if tool.Version != "" {
+				fmt.Printf(" (%s)", tool.Version)
+			}
+			fmt.Println()
+		} else {
+			yellow.Println("○ not found (optional)")
 		}
 	}
 
@@ -115,9 +143,12 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	// Summary
+	totalOptional := optionalGoCount + optionalCount
+	totalOptionalInstalled := optionalGoInstalled + optionalInstalled
+
 	fmt.Println("\n─────────────────────────────────────────────────────")
 	fmt.Printf("Required: %d/%d installed\n", requiredInstalled, requiredCount)
-	fmt.Printf("Optional: %d/%d installed\n", optionalInstalled, optionalCount)
+	fmt.Printf("Optional: %d/%d installed\n", totalOptionalInstalled, totalOptional)
 	fmt.Printf("Wordlists: %d/%d installed\n", wordlistInstalled, wordlistCount)
 
 	if requiredInstalled < requiredCount || wordlistInstalled < wordlistCount {
@@ -129,7 +160,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		green.Println("✓ All required tools and wordlists are installed!")
 	}
 
-	if optionalInstalled < optionalCount {
+	if totalOptionalInstalled < totalOptional {
 		yellow.Println("  Run 'reconator install --extras' for optional tools")
 	}
 

@@ -1,0 +1,661 @@
+package iprange
+
+import (
+	"fmt"
+	"net"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/rootsploit/reconator/internal/config"
+	"github.com/rootsploit/reconator/internal/exec"
+	"github.com/rootsploit/reconator/internal/tools"
+)
+
+type Result struct {
+	Target            string            `json:"target"`
+	IPs               []string          `json:"ips"`
+	Domains           []string          `json:"domains"`
+	Sources           map[string]int    `json:"sources"`
+	IPToDomains       map[string][]string `json:"ip_to_domains"`
+	Duration          time.Duration     `json:"duration"`
+}
+
+type Discoverer struct {
+	cfg *config.Config
+	c   *tools.Checker
+}
+
+func NewDiscoverer(cfg *config.Config, checker *tools.Checker) *Discoverer {
+	return &Discoverer{cfg: cfg, c: checker}
+}
+
+// IsIPTarget checks if the target is an IP address or CIDR range
+func IsIPTarget(target string) bool {
+	// Check for CIDR notation (e.g., 192.168.1.0/24)
+	if strings.Contains(target, "/") {
+		_, _, err := net.ParseCIDR(target)
+		return err == nil
+	}
+	// Check for single IP
+	return net.ParseIP(target) != nil
+}
+
+// IsCIDR checks if target is specifically a CIDR range
+func IsCIDR(target string) bool {
+	if !strings.Contains(target, "/") {
+		return false
+	}
+	_, _, err := net.ParseCIDR(target)
+	return err == nil
+}
+
+// IsASN checks if target is an ASN (e.g., AS13335, AS15169, 13335)
+func IsASN(target string) bool {
+	target = strings.ToUpper(strings.TrimSpace(target))
+	// Remove "AS" prefix if present
+	if strings.HasPrefix(target, "AS") {
+		target = target[2:]
+	}
+	// Check if remaining is a number
+	if target == "" {
+		return false
+	}
+	for _, c := range target {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// DiscoverFromASN finds domains and IP ranges associated with an ASN using asnmap
+func (d *Discoverer) DiscoverFromASN(asn string) (*Result, error) {
+	start := time.Now()
+	result := &Result{
+		Target:      asn,
+		Sources:     make(map[string]int),
+		IPToDomains: make(map[string][]string),
+	}
+
+	if !d.c.IsInstalled("asnmap") {
+		return nil, fmt.Errorf("asnmap not installed (run 'reconator install --extras')")
+	}
+
+	// Normalize ASN format (ensure AS prefix)
+	normalizedASN := strings.ToUpper(strings.TrimSpace(asn))
+	if !strings.HasPrefix(normalizedASN, "AS") {
+		normalizedASN = "AS" + normalizedASN
+	}
+
+	fmt.Printf("    [*] Querying ASN: %s\n", normalizedASN)
+
+	// Get CIDR ranges from ASN
+	fmt.Println("    [*] Discovering CIDR ranges...")
+	args := []string{"-a", normalizedASN, "-silent"}
+	r := exec.Run("asnmap", args, &exec.Options{Timeout: 2 * time.Minute})
+	if r.Error != nil {
+		return nil, fmt.Errorf("asnmap failed: %v", r.Error)
+	}
+
+	cidrs := exec.Lines(r.Stdout)
+	result.Sources["asnmap_cidrs"] = len(cidrs)
+	fmt.Printf("        asnmap: %d CIDR ranges\n", len(cidrs))
+
+	if len(cidrs) == 0 {
+		result.Duration = time.Since(start)
+		return result, nil
+	}
+
+	// Expand CIDRs to get all IPs (with limit for large ranges)
+	var allIPs []string
+	for _, cidr := range cidrs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		ips := d.expandTarget(cidr)
+		// Limit to first 1000 IPs per CIDR for performance
+		if len(ips) > 1000 {
+			ips = ips[:1000]
+		}
+		allIPs = append(allIPs, ips...)
+	}
+
+	// Limit total IPs
+	if len(allIPs) > 10000 {
+		fmt.Printf("    [*] Limiting to first 10000 IPs (total: %d)\n", len(allIPs))
+		allIPs = allIPs[:10000]
+	}
+
+	result.IPs = allIPs
+	fmt.Printf("    [*] Expanded to %d IPs from %d CIDR ranges\n", len(allIPs), len(cidrs))
+
+	// Now discover domains from these IPs
+	if len(allIPs) > 0 {
+		fmt.Println("    [*] Discovering domains from IPs...")
+		ipResult, err := d.discoverDomainsFromIPs(allIPs)
+		if err == nil {
+			result.Domains = ipResult.Domains
+			for k, v := range ipResult.Sources {
+				result.Sources[k] = v
+			}
+		}
+	}
+
+	result.Duration = time.Since(start)
+	return result, nil
+}
+
+// discoverDomainsFromIPs runs domain discovery tools on a list of IPs
+func (d *Discoverer) discoverDomainsFromIPs(ips []string) (*Result, error) {
+	result := &Result{
+		Sources:     make(map[string]int),
+		IPToDomains: make(map[string][]string),
+	}
+
+	var domains sync.Map
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	// Run discovery tools in parallel
+	discoveryTools := []struct {
+		name string
+		fn   func([]string) []string
+	}{
+		{"hakrevdns", d.hakrevdns},
+		{"hakip2host", d.hakip2host},
+		{"cero", d.cero},
+		{"dnsx_ptr", d.dnsxPTR},
+	}
+
+	for _, t := range discoveryTools {
+		if t.name == "hakrevdns" && !d.c.IsInstalled("hakrevdns") {
+			continue
+		}
+		if t.name == "hakip2host" && !d.c.IsInstalled("hakip2host") {
+			continue
+		}
+		if t.name == "cero" && !d.c.IsInstalled("cero") {
+			continue
+		}
+		if t.name == "dnsx_ptr" && !d.c.IsInstalled("dnsx") {
+			continue
+		}
+
+		wg.Add(1)
+		go func(name string, fn func([]string) []string) {
+			defer wg.Done()
+			res := fn(ips)
+			mu.Lock()
+			result.Sources[name] = len(res)
+			mu.Unlock()
+			for _, domain := range res {
+				domains.Store(domain, true)
+			}
+			fmt.Printf("        %s: %d domains\n", name, len(res))
+		}(t.name, t.fn)
+	}
+
+	wg.Wait()
+
+	// Collect unique domains
+	var domainList []string
+	domains.Range(func(k, _ interface{}) bool {
+		domain := k.(string)
+		if domain != "" && isValidDomain(domain) {
+			domainList = append(domainList, domain)
+		}
+		return true
+	})
+
+	sort.Strings(domainList)
+	result.Domains = domainList
+
+	return result, nil
+}
+
+// Discover finds domains associated with IP addresses or CIDR ranges
+func (d *Discoverer) Discover(target string) (*Result, error) {
+	start := time.Now()
+	result := &Result{
+		Target:      target,
+		Sources:     make(map[string]int),
+		IPToDomains: make(map[string][]string),
+	}
+
+	// Expand CIDR to individual IPs if needed
+	ips := d.expandTarget(target)
+	result.IPs = ips
+	if len(ips) == 0 {
+		return result, fmt.Errorf("no valid IPs in target")
+	}
+
+	fmt.Printf("    [*] Target has %d IP(s)\n", len(ips))
+
+	var domains sync.Map
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	// Run discovery tools in parallel
+	discoveryTools := []struct {
+		name string
+		fn   func([]string) []string
+	}{
+		{"hakrevdns", d.hakrevdns},
+		{"hakip2host", d.hakip2host},
+		{"cero", d.cero},
+		{"dnsx_ptr", d.dnsxPTR},
+	}
+
+	for _, t := range discoveryTools {
+		if t.name == "hakrevdns" && !d.c.IsInstalled("hakrevdns") {
+			continue
+		}
+		if t.name == "hakip2host" && !d.c.IsInstalled("hakip2host") {
+			continue
+		}
+		if t.name == "cero" && !d.c.IsInstalled("cero") {
+			continue
+		}
+		if t.name == "dnsx_ptr" && !d.c.IsInstalled("dnsx") {
+			continue
+		}
+
+		wg.Add(1)
+		go func(name string, fn func([]string) []string) {
+			defer wg.Done()
+			res := fn(ips)
+			mu.Lock()
+			result.Sources[name] = len(res)
+			mu.Unlock()
+			for _, domain := range res {
+				domains.Store(domain, true)
+			}
+			fmt.Printf("        %s: %d domains\n", name, len(res))
+		}(t.name, t.fn)
+	}
+
+	wg.Wait()
+
+	// Collect unique domains
+	var domainList []string
+	domains.Range(func(k, _ interface{}) bool {
+		domain := k.(string)
+		if domain != "" && isValidDomain(domain) {
+			domainList = append(domainList, domain)
+		}
+		return true
+	})
+
+	sort.Strings(domainList)
+	result.Domains = domainList
+	result.Duration = time.Since(start)
+
+	return result, nil
+}
+
+// expandTarget expands CIDR to individual IPs or returns single IP
+func (d *Discoverer) expandTarget(target string) []string {
+	// Single IP
+	if ip := net.ParseIP(target); ip != nil {
+		return []string{target}
+	}
+
+	// CIDR range - use mapcidr if available for large ranges
+	if d.c.IsInstalled("mapcidr") {
+		r := exec.RunWithInput("mapcidr", []string{"-silent"}, target, &exec.Options{Timeout: 2 * time.Minute})
+		if r.Error == nil && r.Stdout != "" {
+			return exec.Lines(r.Stdout)
+		}
+	}
+
+	// Fallback: expand CIDR in Go
+	return expandCIDR(target)
+}
+
+// expandCIDR expands a CIDR notation to individual IPs
+func expandCIDR(cidr string) []string {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil
+	}
+
+	var ips []string
+	for ip := ipnet.IP.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
+		ips = append(ips, ip.String())
+		// Limit to /16 at most (65536 IPs)
+		if len(ips) > 65536 {
+			break
+		}
+	}
+
+	// Remove network and broadcast addresses for /24 and smaller
+	if len(ips) > 2 {
+		ones, _ := ipnet.Mask.Size()
+		if ones >= 24 {
+			ips = ips[1 : len(ips)-1]
+		}
+	}
+
+	return ips
+}
+
+func incrementIP(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
+}
+
+// hakrevdns performs reverse DNS lookups using hakrevdns
+func (d *Discoverer) hakrevdns(ips []string) []string {
+	if !d.c.IsInstalled("hakrevdns") {
+		return nil
+	}
+
+	// Use temp file for input (more reliable than stdin for some tools)
+	input := strings.Join(ips, "\n")
+	tmpFile, cleanup, err := exec.TempFile(input, "-ips.txt")
+	if err != nil {
+		// Fallback to stdin
+		args := []string{"-d"}
+		if d.cfg.DNSThreads > 0 {
+			args = append(args, "-t", fmt.Sprintf("%d", d.cfg.DNSThreads))
+		}
+		r := exec.RunWithInput("hakrevdns", args, input, &exec.Options{Timeout: 3 * time.Minute})
+		if r.Error != nil {
+			return nil
+		}
+		return extractDomains(exec.Lines(r.Stdout))
+	}
+	defer cleanup()
+
+	// hakrevdns reads from file via stdin redirection: cat file | hakrevdns
+	// But some versions support -l flag for file input
+	args := []string{"-d"}
+	if d.cfg.DNSThreads > 0 {
+		args = append(args, "-t", fmt.Sprintf("%d", d.cfg.DNSThreads))
+	}
+
+	// Try with file input via stdin using shell
+	r := exec.Run("sh", []string{"-c", fmt.Sprintf("cat %s | hakrevdns %s", tmpFile, strings.Join(args, " "))}, &exec.Options{Timeout: 3 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+
+	return extractDomains(exec.Lines(r.Stdout))
+}
+
+// hakip2host uses multiple methods to find hostnames for IPs
+func (d *Discoverer) hakip2host(ips []string) []string {
+	if !d.c.IsInstalled("hakip2host") {
+		return nil
+	}
+
+	// Use temp file and shell pipe (more reliable)
+	input := strings.Join(ips, "\n")
+	tmpFile, cleanup, err := exec.TempFile(input, "-ips.txt")
+	if err != nil {
+		// Fallback to stdin
+		r := exec.RunWithInput("hakip2host", nil, input, &exec.Options{Timeout: 3 * time.Minute})
+		if r.Error != nil {
+			return nil
+		}
+		return parseHakip2hostOutput(r.Stdout)
+	}
+	defer cleanup()
+
+	// Use shell pipe: cat file | hakip2host
+	r := exec.Run("sh", []string{"-c", fmt.Sprintf("cat %s | hakip2host", tmpFile)}, &exec.Options{Timeout: 3 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+
+	return parseHakip2hostOutput(r.Stdout)
+}
+
+// parseHakip2hostOutput parses hakip2host output format: [method] IP domain
+func parseHakip2hostOutput(output string) []string {
+	var domains []string
+	for _, line := range exec.Lines(output) {
+		parts := strings.Fields(line)
+		if len(parts) >= 3 {
+			domain := strings.TrimSuffix(parts[2], ".")
+			if isValidDomain(domain) {
+				domains = append(domains, domain)
+			}
+		}
+	}
+	return domains
+}
+
+// cero uses certificate transparency to find domains for IPs
+func (d *Discoverer) cero(ips []string) []string {
+	if !d.c.IsInstalled("cero") {
+		return nil
+	}
+
+	// Use temp file and shell pipe
+	input := strings.Join(ips, "\n")
+	tmpFile, cleanup, err := exec.TempFile(input, "-ips.txt")
+	if err != nil {
+		return nil
+	}
+	defer cleanup()
+
+	// Build args
+	args := "-p 443"
+	if d.cfg.Threads > 0 {
+		args += fmt.Sprintf(" -c %d", d.cfg.Threads)
+	}
+
+	// Use shell pipe: cat file | cero (cero is fast - 2 min timeout)
+	r := exec.Run("sh", []string{"-c", fmt.Sprintf("cat %s | cero %s", tmpFile, args)}, &exec.Options{Timeout: 2 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+
+	return extractDomains(exec.Lines(r.Stdout))
+}
+
+// dnsxPTR uses dnsx for PTR record lookups
+func (d *Discoverer) dnsxPTR(ips []string) []string {
+	if !d.c.IsInstalled("dnsx") {
+		return nil
+	}
+
+	// Use temp file and shell pipe
+	input := strings.Join(ips, "\n")
+	tmpFile, cleanup, err := exec.TempFile(input, "-ips.txt")
+	if err != nil {
+		return nil
+	}
+	defer cleanup()
+
+	// Build args
+	args := "-ptr -resp-only -silent"
+	if d.cfg.DNSThreads > 0 {
+		args += fmt.Sprintf(" -t %d", d.cfg.DNSThreads)
+	}
+
+	// Use shell pipe: cat file | dnsx
+	r := exec.Run("sh", []string{"-c", fmt.Sprintf("cat %s | dnsx %s", tmpFile, args)}, &exec.Options{Timeout: 3 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+
+	return extractDomains(exec.Lines(r.Stdout))
+}
+
+// extractDomains cleans and validates domain names from output
+func extractDomains(lines []string) []string {
+	seen := make(map[string]bool)
+	var domains []string
+
+	for _, line := range lines {
+		// Remove trailing dots
+		domain := strings.TrimSuffix(strings.TrimSpace(line), ".")
+		if domain == "" {
+			continue
+		}
+
+		// Some tools output "IP domain" format
+		if parts := strings.Fields(domain); len(parts) > 1 {
+			domain = strings.TrimSuffix(parts[len(parts)-1], ".")
+		}
+
+		if isValidDomain(domain) && !seen[domain] {
+			seen[domain] = true
+			domains = append(domains, domain)
+		}
+	}
+
+	return domains
+}
+
+// Internal/invalid TLDs to filter out
+var internalTLDs = map[string]bool{
+	"local":     true,
+	"localhost": true,
+	"internal":  true,
+	"cluster":   true,
+	"svc":       true,
+	"default":   true,
+	"lan":       true,
+	"home":      true,
+	"localdomain": true,
+	"intranet":  true,
+	"private":   true,
+	"corp":      true,
+	"invalid":   true,
+	"test":      true,
+	"example":   true,
+	"onion":     true, // Tor, skip
+}
+
+// Common internal domain patterns
+var internalPatterns = []string{
+	"kubernetes",
+	"k8s",
+	"kube-",
+	"svc.cluster",
+	".internal.",
+	".local.",
+	".lan.",
+	".home.",
+}
+
+// isValidDomain checks if a string is a valid PUBLIC domain name
+func isValidDomain(s string) bool {
+	s = strings.ToLower(s)
+
+	// Basic validation - must have at least one dot
+	if !strings.Contains(s, ".") {
+		return false
+	}
+	// Check it's not an IP address
+	if net.ParseIP(s) != nil {
+		return false
+	}
+
+	// Check for internal patterns
+	for _, pattern := range internalPatterns {
+		if strings.Contains(s, pattern) {
+			return false
+		}
+	}
+
+	// Get TLD (last part after dot)
+	parts := strings.Split(s, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	tld := parts[len(parts)-1]
+
+	// Check against internal TLDs blocklist
+	if internalTLDs[tld] {
+		return false
+	}
+
+	// Check second-level for patterns like "default.svc"
+	if len(parts) >= 2 {
+		secondLevel := parts[len(parts)-2]
+		if internalTLDs[secondLevel] {
+			return false
+		}
+	}
+
+	// Basic domain regex
+	domainRegex := regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$`)
+	if !domainRegex.MatchString(s) {
+		return false
+	}
+
+	// Validate TLD is likely public (2-63 chars, alphabetic)
+	if len(tld) < 2 || len(tld) > 63 {
+		return false
+	}
+
+	return true
+}
+
+// ExtractTLDs extracts unique top-level domains (base domains) from discovered domains
+// Only returns valid public domains, filtering out internal/private ones
+func ExtractTLDs(domains []string) []string {
+	seen := make(map[string]bool)
+	var tlds []string
+
+	for _, domain := range domains {
+		// Skip invalid domains
+		if !isValidDomain(domain) {
+			continue
+		}
+
+		tld := extractBaseDomain(domain)
+		if tld == "" || seen[tld] {
+			continue
+		}
+
+		// Validate the extracted base domain is also valid
+		if !isValidDomain(tld) {
+			continue
+		}
+
+		seen[tld] = true
+		tlds = append(tlds, tld)
+	}
+
+	sort.Strings(tlds)
+	return tlds
+}
+
+// extractBaseDomain extracts the base domain (e.g., "example.com" from "sub.example.com")
+func extractBaseDomain(domain string) string {
+	parts := strings.Split(domain, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	// Handle common multi-part TLDs
+	multiPartTLDs := map[string]bool{
+		"co.uk": true, "com.au": true, "co.nz": true, "co.jp": true,
+		"com.br": true, "co.in": true, "org.uk": true, "net.au": true,
+	}
+
+	if len(parts) >= 3 {
+		possibleMultiTLD := parts[len(parts)-2] + "." + parts[len(parts)-1]
+		if multiPartTLDs[possibleMultiTLD] {
+			if len(parts) >= 3 {
+				return parts[len(parts)-3] + "." + possibleMultiTLD
+			}
+		}
+	}
+
+	// Standard TLD (last two parts)
+	return parts[len(parts)-2] + "." + parts[len(parts)-1]
+}

@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/rootsploit/reconator/internal/debug"
 )
 
 type Result struct {
@@ -32,6 +34,9 @@ func Run(name string, args []string, opts *Options) *Result {
 		opts.Timeout = 5 * time.Minute
 	}
 
+	// Debug: log start
+	start := debug.LogStart(name, args)
+
 	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
 	defer cancel()
 
@@ -51,7 +56,6 @@ func Run(name string, args []string, opts *Options) *Result {
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
-	start := time.Now()
 	err := cmd.Run()
 
 	r := &Result{
@@ -65,6 +69,11 @@ func Run(name string, args []string, opts *Options) *Result {
 			r.ExitCode = exitErr.ExitCode()
 		}
 	}
+
+	// Debug: log end
+	outputLines := len(Lines(r.Stdout))
+	debug.LogEnd(name, args, start, r.Error, outputLines)
+
 	return r
 }
 

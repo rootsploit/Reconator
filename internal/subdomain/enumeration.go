@@ -2,6 +2,7 @@ package subdomain
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -60,6 +61,13 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 			fn   func(string) []string
 		}{"findomain", e.findomain})
 	}
+	// favirecon uses favicon hashes to find related domains
+	if e.cfg.FaviconHash != "" && e.c.IsInstalled("favirecon") {
+		tools = append(tools, struct {
+			name string
+			fn   func(string) []string
+		}{"favirecon", e.favirecon})
+	}
 
 	for _, t := range tools {
 		wg.Add(1)
@@ -102,8 +110,8 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 
 	wg.Wait()
 
-	// Phase 2: DNS Bruteforce with puredns (skip in stealth mode)
-	if !e.cfg.StealthMode && !e.cfg.SkipValidation && e.c.IsInstalled("puredns") {
+	// Phase 2: DNS Bruteforce with puredns (runs in passive mode - DNS is passive)
+	if !e.cfg.SkipValidation && e.c.IsInstalled("puredns") {
 		fmt.Println("    [*] DNS bruteforce...")
 		res := e.bruteforce(domain)
 		result.Sources["dns_bruteforce"] = len(res)
@@ -111,8 +119,6 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		for _, s := range res {
 			subs.Store(s, true)
 		}
-	} else if e.cfg.StealthMode {
-		fmt.Println("    [*] DNS bruteforce... SKIPPED (stealth)")
 	}
 
 	// Collect current subdomains for permutation
@@ -126,23 +132,17 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 	})
 
 	// Phase 3: Permutations (alterx + mksub + dsieve)
-	// Default mode: full permutations with alterx (up to 2000 subs)
-	// Fast mode: mksub only (up to 500 subs)
+	// Runs in passive mode too - permutations are passive (DNS validation)
 	maxSubs := 2000
-	if e.cfg.FastMode {
-		maxSubs = 500
-	}
 
-	if e.cfg.StealthMode {
-		fmt.Println("    [*] Permutations... SKIPPED (stealth)")
-	} else if len(current) > 0 && len(current) < maxSubs {
+	if len(current) > 0 && len(current) < maxSubs {
 		fmt.Println("    [*] Generating permutations...")
 
 		permSet := make(map[string]bool)
 		var alterxCount, mksubCount int
 
-		// alterx (skip in fast mode - generates many permutations)
-		if !e.cfg.FastMode && e.c.IsInstalled("alterx") {
+		// alterx generates permutations
+		if e.c.IsInstalled("alterx") {
 			res := e.alterx(current)
 			alterxCount = len(res)
 			for _, s := range res {
@@ -161,13 +161,13 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 			fmt.Printf("        mksub: %d\n", mksubCount)
 		}
 
-		// Convert to slice and filter with dsieve (default mode only)
+		// Convert to slice and filter with dsieve
 		var permuted []string
 		for s := range permSet {
 			permuted = append(permuted, s)
 		}
 
-		if !e.cfg.FastMode && len(permuted) > 0 {
+		if len(permuted) > 0 {
 			fmt.Printf("        combined unique: %d\n", len(permuted))
 			if e.c.IsInstalled("dsieve") {
 				permuted = e.dsieve(domain, permuted)
@@ -178,9 +178,7 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		// Record counts
 		result.Sources["alterx"] = alterxCount
 		result.Sources["mksub"] = mksubCount
-		if !e.cfg.FastMode {
-			result.Sources["permutations"] = len(permuted)
-		}
+		result.Sources["permutations"] = len(permuted)
 
 		for _, s := range permuted {
 			subs.Store(s, true)
@@ -265,6 +263,28 @@ func (e *Enumerator) findomain(domain string) []string {
 		return nil
 	}
 	return exec.Lines(r.Stdout)
+}
+
+func (e *Enumerator) favirecon(domain string) []string {
+	if !e.c.IsInstalled("favirecon") || e.cfg.FaviconHash == "" {
+		return nil
+	}
+	// favirecon -fh <hash> finds domains using that favicon hash
+	// It queries Shodan, so results may include subdomains of the target
+	args := []string{"-fh", e.cfg.FaviconHash, "-silent"}
+	r := exec.Run("favirecon", args, &exec.Options{Timeout: 2 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+	// Filter results to only include subdomains of the target domain
+	var results []string
+	suffix := "." + domain
+	for _, line := range exec.Lines(r.Stdout) {
+		if strings.HasSuffix(line, suffix) || line == domain {
+			results = append(results, line)
+		}
+	}
+	return results
 }
 
 func (e *Enumerator) bruteforce(domain string) []string {
@@ -384,26 +404,54 @@ func (e *Enumerator) validate(subs []string) []string {
 	}
 	defer cleanup()
 
+	// Prefer dnsx for validation - it reliably outputs to stdout
+	if e.c.IsInstalled("dnsx") {
+		args := []string{"-l", tmp, "-silent", "-resp"}
+		if e.cfg.DNSThreads > 0 {
+			args = append(args, "-t", fmt.Sprintf("%d", e.cfg.DNSThreads))
+		}
+		if r := exec.Run("dnsx", args, &exec.Options{Timeout: 10 * time.Minute}); r.Error == nil {
+			// dnsx with -resp outputs "domain [ip]", extract just the domain
+			var results []string
+			for _, line := range exec.Lines(r.Stdout) {
+				parts := strings.Fields(line)
+				if len(parts) > 0 {
+					results = append(results, parts[0])
+				}
+			}
+			if len(results) > 0 {
+				return results
+			}
+		}
+	}
+
+	// Fallback to puredns with explicit output file
 	if e.c.IsInstalled("puredns") {
-		args := []string{"resolve", tmp, "-q"}
-		if e.cfg.ResolversFile != "" {
-			args = append(args, "-r", e.cfg.ResolversFile)
+		outTmp, outCleanup, err := exec.TempFile("", "-resolved.txt")
+		if err != nil {
+			return subs
+		}
+		defer outCleanup()
+
+		args := []string{"resolve", tmp, "-q", "-w", outTmp}
+		// Use resolvers from config or find installed resolvers
+		resolvers := e.cfg.ResolversFile
+		if resolvers == "" {
+			resolvers = tools.FindResolvers()
+		}
+		if resolvers != "" {
+			args = append(args, "-r", resolvers)
 		}
 		if e.cfg.DNSThreads > 0 {
 			args = append(args, "-t", fmt.Sprintf("%d", e.cfg.DNSThreads))
 		}
 		if r := exec.Run("puredns", args, &exec.Options{Timeout: 10 * time.Minute}); r.Error == nil {
-			return exec.Lines(r.Stdout)
-		}
-	}
-
-	if e.c.IsInstalled("dnsx") {
-		args := []string{"-l", tmp, "-silent"}
-		if e.cfg.DNSThreads > 0 {
-			args = append(args, "-t", fmt.Sprintf("%d", e.cfg.DNSThreads))
-		}
-		if r := exec.Run("dnsx", args, &exec.Options{Timeout: 10 * time.Minute}); r.Error == nil {
-			return exec.Lines(r.Stdout)
+			// Read from output file
+			if content, err := os.ReadFile(outTmp); err == nil {
+				if results := exec.Lines(string(content)); len(results) > 0 {
+					return results
+				}
+			}
 		}
 	}
 

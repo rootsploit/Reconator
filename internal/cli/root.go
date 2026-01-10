@@ -32,7 +32,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&cfg.OutputDir, "output", "o", "./results", "Output directory")
 
 	// Phase selection
-	rootCmd.Flags().StringSliceVarP(&cfg.Phases, "phases", "p", []string{"all"}, "Phases to run (subdomain,waf,ports,takeover,historic,all)")
+	rootCmd.Flags().StringSliceVarP(&cfg.Phases, "phases", "p", []string{"all"}, "Phases to run (subdomain,waf,ports,takeover,historic,tech,all)")
 	rootCmd.Flags().BoolVar(&cfg.SkipValidation, "skip-validation", false, "Skip DNS validation")
 
 	// Performance flags
@@ -41,13 +41,15 @@ func init() {
 	rootCmd.Flags().IntVarP(&cfg.RateLimit, "rate", "r", 0, "Rate limit (requests per second, 0 = unlimited)")
 
 	// Mode flags
-	rootCmd.Flags().BoolVar(&cfg.StealthMode, "stealth", false, "Stealth mode: skip DNS bruteforce, permutations, scan only direct hosts")
-	rootCmd.Flags().BoolVar(&cfg.FastMode, "fast", false, "Fast mode: skip alterx, limit permutations")
+	rootCmd.Flags().BoolVar(&cfg.PassiveMode, "passive", false, "Passive mode: skip active tools (port scan, katana, wappalyzer)")
 
 	// Tool flags
 	rootCmd.Flags().BoolVar(&cfg.UseOptional, "use-optional", true, "Use optional non-Go tools if available")
 	rootCmd.Flags().StringVar(&cfg.ResolversFile, "resolvers", "", "Custom resolvers file for DNS validation")
 	rootCmd.Flags().StringVar(&cfg.WordlistFile, "wordlist", "", "Custom wordlist for bruteforce")
+
+	// Debug flag
+	rootCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Show detailed timing logs for each tool execution")
 
 	// Add subcommands
 	rootCmd.AddCommand(scanCmd)

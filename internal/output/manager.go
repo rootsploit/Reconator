@@ -9,10 +9,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rootsploit/reconator/internal/aiguided"
+	"github.com/rootsploit/reconator/internal/dirbrute"
 	"github.com/rootsploit/reconator/internal/historic"
+	"github.com/rootsploit/reconator/internal/iprange"
 	"github.com/rootsploit/reconator/internal/portscan"
 	"github.com/rootsploit/reconator/internal/subdomain"
 	"github.com/rootsploit/reconator/internal/takeover"
+	"github.com/rootsploit/reconator/internal/techdetect"
+	"github.com/rootsploit/reconator/internal/vulnscan"
 	"github.com/rootsploit/reconator/internal/waf"
 )
 
@@ -30,11 +35,45 @@ func NewManager(outputDir string) *Manager {
 	}
 }
 
+// BaseDir returns the base output directory
+func (m *Manager) BaseDir() string {
+	return m.outputDir
+}
+
 // phaseDir creates and returns the path to a phase subdirectory
 func (m *Manager) phaseDir(phase string) string {
 	dir := filepath.Join(m.outputDir, phase)
 	os.MkdirAll(dir, 0755)
 	return dir
+}
+
+// SaveIPRangeResults saves IP range discovery results
+func (m *Manager) SaveIPRangeResults(result *iprange.Result) error {
+	m.results["iprange"] = result
+	dir := m.phaseDir("0-iprange")
+
+	// Save JSON
+	if err := m.saveJSON(filepath.Join(dir, "ip_discovery.json"), result); err != nil {
+		return err
+	}
+
+	// Save discovered IPs
+	if len(result.IPs) > 0 {
+		m.saveLines(filepath.Join(dir, "ips.txt"), result.IPs)
+	}
+
+	// Save discovered domains
+	if len(result.Domains) > 0 {
+		m.saveLines(filepath.Join(dir, "domains.txt"), result.Domains)
+	}
+
+	// Save base domains (TLDs)
+	tlds := iprange.ExtractTLDs(result.Domains)
+	if len(tlds) > 0 {
+		m.saveLines(filepath.Join(dir, "base_domains.txt"), tlds)
+	}
+
+	return nil
 }
 
 // SaveSubdomains saves subdomain enumeration results
@@ -172,6 +211,151 @@ func (m *Manager) SaveHistoricResults(result *historic.Result) error {
 	return nil
 }
 
+// SaveTechResults saves technology detection results
+func (m *Manager) SaveTechResults(result *techdetect.Result) error {
+	m.results["tech"] = result
+	dir := m.phaseDir("6-tech")
+
+	// Save JSON
+	if err := m.saveJSON(filepath.Join(dir, "tech_detection.json"), result); err != nil {
+		return err
+	}
+
+	// Save tech by host
+	if len(result.TechByHost) > 0 {
+		var lines []string
+		for host, techs := range result.TechByHost {
+			lines = append(lines, fmt.Sprintf("%s: %s", host, strings.Join(techs, ", ")))
+		}
+		sort.Strings(lines)
+		m.saveLines(filepath.Join(dir, "tech_by_host.txt"), lines)
+	}
+
+	// Save tech summary (most common technologies)
+	if len(result.TechCount) > 0 {
+		var lines []string
+		for tech, count := range result.TechCount {
+			lines = append(lines, fmt.Sprintf("%s: %d", tech, count))
+		}
+		sort.Strings(lines)
+		m.saveLines(filepath.Join(dir, "tech_summary.txt"), lines)
+	}
+
+	return nil
+}
+
+// SaveDirBruteResults saves directory bruteforce results
+func (m *Manager) SaveDirBruteResults(result *dirbrute.Result) error {
+	m.results["dirbrute"] = result
+	dir := m.phaseDir("7-dirbrute")
+
+	// Save JSON
+	if err := m.saveJSON(filepath.Join(dir, "dirbrute.json"), result); err != nil {
+		return err
+	}
+
+	// Save discoveries
+	if len(result.Discoveries) > 0 {
+		var lines []string
+		for _, d := range result.Discoveries {
+			lines = append(lines, fmt.Sprintf("%s [%d] %s", d.URL, d.StatusCode, d.Tool))
+		}
+		m.saveLines(filepath.Join(dir, "discoveries.txt"), lines)
+
+		// Save just URLs
+		var urls []string
+		for _, d := range result.Discoveries {
+			urls = append(urls, d.URL)
+		}
+		m.saveLines(filepath.Join(dir, "discovered_urls.txt"), urls)
+	}
+
+	return nil
+}
+
+// SaveVulnResults saves vulnerability scanning results
+func (m *Manager) SaveVulnResults(result *vulnscan.Result) error {
+	m.results["vulnscan"] = result
+	dir := m.phaseDir("8-vulnscan")
+
+	// Save JSON
+	if err := m.saveJSON(filepath.Join(dir, "vulnerabilities.json"), result); err != nil {
+		return err
+	}
+
+	// Save vulnerabilities by severity
+	if len(result.Vulnerabilities) > 0 {
+		var critical, high, medium []string
+		for _, v := range result.Vulnerabilities {
+			line := fmt.Sprintf("%s | %s | %s | %s", v.Host, v.TemplateID, v.Name, v.Tool)
+			if v.URL != "" {
+				line = fmt.Sprintf("%s | %s | %s | %s", v.URL, v.TemplateID, v.Name, v.Tool)
+			}
+			switch v.Severity {
+			case "critical":
+				critical = append(critical, line)
+			case "high":
+				high = append(high, line)
+			case "medium":
+				medium = append(medium, line)
+			}
+		}
+		if len(critical) > 0 {
+			m.saveLines(filepath.Join(dir, "critical.txt"), critical)
+		}
+		if len(high) > 0 {
+			m.saveLines(filepath.Join(dir, "high.txt"), high)
+		}
+		if len(medium) > 0 {
+			m.saveLines(filepath.Join(dir, "medium.txt"), medium)
+		}
+
+		// Save all vulnerabilities
+		var all []string
+		for _, v := range result.Vulnerabilities {
+			line := fmt.Sprintf("[%s] %s | %s | %s", v.Severity, v.Host, v.TemplateID, v.Name)
+			all = append(all, line)
+		}
+		m.saveLines(filepath.Join(dir, "all_vulnerabilities.txt"), all)
+	}
+
+	return nil
+}
+
+// SaveAIGuidedResults saves AI-guided scanning results
+func (m *Manager) SaveAIGuidedResults(result *aiguided.Result) error {
+	m.results["aiguided"] = result
+	dir := m.phaseDir("9-aiguided")
+
+	// Save JSON
+	if err := m.saveJSON(filepath.Join(dir, "ai_guided.json"), result); err != nil {
+		return err
+	}
+
+	// Save AI recommendations
+	recLines := []string{
+		fmt.Sprintf("AI Provider: %s", result.AIProvider),
+		fmt.Sprintf("Summary: %s", result.TargetSummary),
+		fmt.Sprintf("Recommended Tags: %v", result.RecommendedTags),
+	}
+	if len(result.RecommendedTemplates) > 0 {
+		recLines = append(recLines, fmt.Sprintf("Recommended Templates: %v", result.RecommendedTemplates))
+	}
+	m.saveLines(filepath.Join(dir, "ai_recommendations.txt"), recLines)
+
+	// Save vulnerabilities
+	if len(result.Vulnerabilities) > 0 {
+		var lines []string
+		for _, v := range result.Vulnerabilities {
+			line := fmt.Sprintf("[%s] %s | %s | %s", v.Severity, v.Host, v.TemplateID, v.Name)
+			lines = append(lines, line)
+		}
+		m.saveLines(filepath.Join(dir, "ai_vulnerabilities.txt"), lines)
+	}
+
+	return nil
+}
+
 // SaveSummary saves a summary of all results
 func (m *Manager) SaveSummary(target string) error {
 	summary := Summary{
@@ -220,6 +404,14 @@ func (m *Manager) SaveSummary(target string) error {
 			"total_urls": historicResult.Total,
 			"sources":    historicResult.Sources,
 			"duration":   historicResult.Duration.String(),
+		}
+	}
+
+	if techResult, ok := m.results["tech"].(*techdetect.Result); ok {
+		summary.Results["tech"] = map[string]interface{}{
+			"hosts_scanned": techResult.Total,
+			"unique_techs":  len(techResult.TechCount),
+			"duration":      techResult.Duration.String(),
 		}
 	}
 
