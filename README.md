@@ -13,6 +13,7 @@
 
 <p align="center">
   <a href="docs/USAGE.md">Documentation</a> •
+  <a href="docs/CONFIGURATION.md">Configuration</a> •
   <a href="#-features">Features</a> •
   <a href="#-installation">Install</a> •
   <a href="#-quick-start">Quick Start</a> •
