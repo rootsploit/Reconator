@@ -39,12 +39,18 @@ type Config struct {
 	EnableNotify     bool   // Enable notifications
 
 	// Phase-specific options
-	SkipDirBrute   bool // Skip directory bruteforce
-	SkipVulnScan   bool // Skip vulnerability scanning
-	SkipAIGuided   bool // Skip AI-guided scanning
+	SkipDirBrute bool // Skip directory bruteforce
+	SkipVulnScan bool // Skip vulnerability scanning
+	SkipAIGuided bool // Skip AI-guided scanning
 
 	// Debug
 	Debug bool // Show detailed timing logs for each tool execution
+
+	// New Features
+	EnableScreenshots bool // Capture screenshots using gowitness
+	EnableGraphQL     bool // Detect GraphQL endpoints
+	EnableOSINT       bool // Run OSINT module (Google Dorks, GitHub Secrets)
+	GenerateReport    bool // Generate HTML report
 }
 
 // DefaultConfig returns a configuration with default values
@@ -67,4 +73,3 @@ func (c *Config) ShouldRunPhase(phase string) bool {
 	}
 	return false
 }
-

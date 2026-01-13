@@ -6,6 +6,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/rootsploit/reconator/internal/config"
 	"github.com/rootsploit/reconator/internal/runner"
+	"github.com/rootsploit/reconator/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -77,15 +78,28 @@ func runRecon(cmd *cobra.Command, args []string) error {
 }
 
 func printBanner() {
-	cyan := color.New(color.FgCyan, color.Bold)
-	cyan.Println(`
-  ____                            _
- |  _ \ ___  ___ ___  _ __   __ _| |_ ___  _ __
- | |_) / _ \/ __/ _ \| '_ \ / _' | __/ _ \| '__|
- |  _ <  __/ (_| (_) | | | | (_| | || (_) | |
- |_| \_\___|\___\___/|_| |_|\__,_|\__\___/|_|
+	red := color.New(color.FgRed, color.Bold)
+	cyan := color.New(color.FgCyan)
+	yellow := color.New(color.FgYellow)
+	white := color.New(color.FgWhite, color.Bold)
+	gray := color.New(color.FgHiBlack)
 
-  Fast Reconnaissance Tool for Bug Bounty Hunters
-  github.com/rootsploit/reconator
+	red.Print(`
+    ____                             __
+   / __ \___  _________  ____  ___ _/ /_____  _____
+  / /_/ / _ \/ ___/ __ \/ __ \/ _ '/ __/ __ \/ ___/
+ / _, _/  __/ /__/ /_/ / / / / /_/ / /_/ /_/ / /
+/_/ |_|\___/\___/\____/_/ /_/\__,_/\__/\____/_/
 `)
+	fmt.Println()
+	cyan.Print("  AI-Powered Reconnaissance Framework")
+	gray.Printf("  v%s\n", version.Version)
+	fmt.Println()
+	yellow.Print("  [*] ")
+	white.Println("Secret Detection | Cloud Storage | CVE Intelligence")
+	yellow.Print("  [*] ")
+	white.Println("Token Validation | Admin Panels | AI Analysis")
+	fmt.Println()
+	gray.Println("  github.com/rootsploit/reconator | @RootSploit")
+	fmt.Println()
 }

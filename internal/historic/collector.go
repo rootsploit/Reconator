@@ -266,8 +266,9 @@ func FilterInteresting(urls []string) []string {
 	patterns := []string{".json", ".xml", ".yaml", "/api/", "/v1/", "/v2/", "/admin", "/login", "/auth", "/graphql", ".env", ".git", "swagger", "?"}
 	var out []string
 	for _, u := range urls {
+		lower := strings.ToLower(u)
 		for _, p := range patterns {
-			if strings.Contains(strings.ToLower(u), p) {
+			if strings.Contains(lower, p) {
 				out = append(out, u)
 				break
 			}
@@ -300,17 +301,47 @@ func (c *Collector) CategorizeURLs(urls []string) CategorizedURLs {
 	cat := CategorizedURLs{}
 
 	// Use gf tool if available for better pattern matching
-	if c.c.IsInstalled("gf") {
-		cat.XSS = c.runGF(urls, "xss")
-		cat.SQLi = c.runGF(urls, "sqli")
-		cat.SSRF = c.runGF(urls, "ssrf")
-		cat.LFI = c.runGF(urls, "lfi")
-		cat.RCE = c.runGF(urls, "rce")
-		cat.SSTI = c.runGF(urls, "ssti")
-		cat.Redirect = c.runGF(urls, "redirect")
-		cat.Debug = c.runGF(urls, "debug_logic")
+	if c.c.IsInstalled("gf") && len(urls) > 0 {
+		// Create single temp file for all gf patterns (efficiency optimization)
+		tmp, cleanup, err := exec.TempFile(strings.Join(urls, "\n"), "-urls.txt")
+		if err == nil {
+			defer cleanup()
+
+			// OPTIMIZATION: Run all gf patterns in parallel instead of sequential
+			// This reduces 8 × 2-5s = 16-40s → ~5s (parallel execution)
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+
+			patterns := []struct {
+				name    string
+				pattern string
+				dest    *[]string
+			}{
+				{"xss", "xss", &cat.XSS},
+				{"sqli", "sqli", &cat.SQLi},
+				{"ssrf", "ssrf", &cat.SSRF},
+				{"lfi", "lfi", &cat.LFI},
+				{"rce", "rce", &cat.RCE},
+				{"ssti", "ssti", &cat.SSTI},
+				{"redirect", "redirect", &cat.Redirect},
+				{"debug", "debug_logic", &cat.Debug},
+			}
+
+			for _, p := range patterns {
+				wg.Add(1)
+				go func(pattern string, dest *[]string) {
+					defer wg.Done()
+					result := c.runGFWithFile(tmp, pattern)
+					mu.Lock()
+					*dest = result
+					mu.Unlock()
+				}(p.pattern, p.dest)
+			}
+
+			wg.Wait()
+		}
 	} else {
-		// Fallback to built-in pattern matching
+		// Fallback to built-in pattern matching (already fast, no parallelization needed)
 		cat.XSS = filterByPatterns(urls, xssPatterns)
 		cat.SQLi = filterByPatterns(urls, sqliPatterns)
 		cat.SSRF = filterByPatterns(urls, ssrfPatterns)
@@ -329,20 +360,10 @@ func (c *Collector) CategorizeURLs(urls []string) CategorizedURLs {
 	return cat
 }
 
-// runGF runs gf with a specific pattern
-func (c *Collector) runGF(urls []string, pattern string) []string {
-	if len(urls) == 0 {
-		return nil
-	}
-
-	tmp, cleanup, err := exec.TempFile(strings.Join(urls, "\n"), "-urls.txt")
-	if err != nil {
-		return nil
-	}
-	defer cleanup()
-
+// runGFWithFile runs gf with a specific pattern using an existing temp file
+func (c *Collector) runGFWithFile(tempFile, pattern string) []string {
 	// cat urls.txt | gf pattern
-	r := exec.Run("sh", []string{"-c", fmt.Sprintf("cat %s | gf %s", tmp, pattern)}, &exec.Options{Timeout: 1 * time.Minute})
+	r := exec.Run("sh", []string{"-c", fmt.Sprintf("cat %s | gf %s", tempFile, pattern)}, &exec.Options{Timeout: 1 * time.Minute})
 	if r.Error != nil {
 		return nil
 	}

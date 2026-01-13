@@ -11,11 +11,12 @@ import (
 
 // Wordlist represents a downloadable wordlist
 type Wordlist struct {
-	Name        string
-	Filename    string
-	URL         string
-	Description string
-	Required    bool
+	Name         string
+	Filename     string
+	URL          string
+	FallbackURLs []string // Additional URLs to try if primary fails
+	Description  string
+	Required     bool
 }
 
 // WordlistDir returns the path to the reconator wordlists directory
@@ -59,30 +60,44 @@ func SubdomainWordlistPaths() []string {
 func GetWordlists() []Wordlist {
 	return []Wordlist{
 		{
-			Name:        "DNS Resolvers",
-			Filename:    "resolvers.txt",
-			URL:         "https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt",
+			Name:     "DNS Resolvers",
+			Filename: "resolvers.txt",
+			URL:      "https://cdn.jsdelivr.net/gh/trickest/resolvers@main/resolvers.txt",
+			FallbackURLs: []string{
+				"https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt",
+			},
 			Description: "Trickest quality DNS resolvers",
 			Required:    true,
 		},
 		{
-			Name:        "Subdomain Bruteforce (20k)",
-			Filename:    "subdomain-bruteforce-medium.txt",
-			URL:         "https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/DNS/subdomains-top1million-20000.txt",
+			Name:     "Subdomain Bruteforce (20k)",
+			Filename: "subdomain-bruteforce-medium.txt",
+			URL:      "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/DNS/subdomains-top1million-20000.txt",
+			FallbackURLs: []string{
+				"https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/DNS/subdomains-top1million-20000.txt",
+			},
 			Description: "SecLists top 20k subdomains",
 			Required:    true,
 		},
 		{
-			Name:        "Subdomain Bruteforce (5k)",
-			Filename:    "subdomain-bruteforce.txt",
-			URL:         "https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/DNS/subdomains-top1million-5000.txt",
+			Name:     "Subdomain Bruteforce (5k)",
+			Filename: "subdomain-bruteforce.txt",
+			URL:      "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/DNS/subdomains-top1million-5000.txt",
+			FallbackURLs: []string{
+				"https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/DNS/subdomains-top1million-5000.txt",
+			},
 			Description: "SecLists top 5k subdomains (quick)",
 			Required:    false,
 		},
 		{
-			Name:        "Directory Bruteforce",
-			Filename:    "directory-list-2.3-small.txt",
-			URL:         "https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt",
+			Name:     "Directory Bruteforce",
+			Filename: "directory-list-2.3-small.txt",
+			URL:      "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/Web-Content/directory-list-2.3-small.txt",
+			FallbackURLs: []string{
+				"https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt",
+				"https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/Web-Content/directory-list-2.3-small.txt",
+				"https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/Web-Content/DirBuster-2007_directory-list-2.3-small.txt",
+			},
 			Description: "SecLists directory bruteforce wordlist",
 			Required:    true,
 		},
@@ -134,32 +149,46 @@ func DownloadWordlist(wl Wordlist) error {
 		return nil // Already exists
 	}
 
-	// Download
+	// Build list of URLs to try (primary + fallbacks)
+	urls := append([]string{wl.URL}, wl.FallbackURLs...)
+
 	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(wl.URL)
-	if err != nil {
-		return fmt.Errorf("download: %w", err)
-	}
-	defer resp.Body.Close()
+	var lastErr error
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
+	for _, url := range urls {
+		resp, err := client.Get(url)
+		if err != nil {
+			lastErr = fmt.Errorf("download: %w", err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
+			continue
+		}
+
+		// Create file
+		out, err := os.Create(destPath)
+		if err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("create file: %w", err)
+		}
+
+		_, err = io.Copy(out, resp.Body)
+		out.Close()
+		resp.Body.Close()
+
+		if err != nil {
+			os.Remove(destPath)
+			lastErr = fmt.Errorf("write file: %w", err)
+			continue
+		}
+
+		return nil // Success
 	}
 
-	// Create file
-	out, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("create file: %w", err)
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		os.Remove(destPath)
-		return fmt.Errorf("write file: %w", err)
-	}
-
-	return nil
+	return fmt.Errorf("all download URLs failed: %v", lastErr)
 }
 
 // CheckWordlists checks if wordlists are installed

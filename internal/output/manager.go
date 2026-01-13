@@ -14,6 +14,7 @@ import (
 	"github.com/rootsploit/reconator/internal/historic"
 	"github.com/rootsploit/reconator/internal/iprange"
 	"github.com/rootsploit/reconator/internal/portscan"
+	"github.com/rootsploit/reconator/internal/storage"
 	"github.com/rootsploit/reconator/internal/subdomain"
 	"github.com/rootsploit/reconator/internal/takeover"
 	"github.com/rootsploit/reconator/internal/techdetect"
@@ -25,6 +26,12 @@ import (
 type Manager struct {
 	outputDir string
 	results   map[string]interface{}
+
+	// Scan metadata (set once per scan, zero overhead)
+	scanID    string
+	target    string
+	version   string
+	startTime time.Time
 }
 
 // NewManager creates a new output manager
@@ -32,7 +39,21 @@ func NewManager(outputDir string) *Manager {
 	return &Manager{
 		outputDir: outputDir,
 		results:   make(map[string]interface{}),
+		scanID:    storage.GenerateScanID(),
+		startTime: time.Now(),
 	}
+}
+
+// SetScanMeta sets scan-level metadata (call once at scan start)
+// Zero overhead: just stores values, no I/O
+func (m *Manager) SetScanMeta(target, version string) {
+	m.target = target
+	m.version = version
+}
+
+// ScanID returns the unique scan identifier
+func (m *Manager) ScanID() string {
+	return m.scanID
 }
 
 // BaseDir returns the base output directory
@@ -358,9 +379,14 @@ func (m *Manager) SaveAIGuidedResults(result *aiguided.Result) error {
 
 // SaveSummary saves a summary of all results
 func (m *Manager) SaveSummary(target string) error {
+	endTime := time.Now()
 	summary := Summary{
+		ScanID:    m.scanID,
 		Target:    target,
-		Timestamp: time.Now(),
+		Version:   m.version,
+		StartTime: m.startTime,
+		EndTime:   endTime,
+		Duration:  endTime.Sub(m.startTime).String(),
 		Results:   make(map[string]interface{}),
 	}
 
@@ -420,9 +446,16 @@ func (m *Manager) SaveSummary(target string) error {
 
 // Summary represents a scan summary
 type Summary struct {
-	Target    string                 `json:"target"`
-	Timestamp time.Time              `json:"timestamp"`
-	Results   map[string]interface{} `json:"results"`
+	// Scan metadata
+	ScanID    string    `json:"scan_id"`
+	Target    string    `json:"target"`
+	Version   string    `json:"version,omitempty"`
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+	Duration  string    `json:"duration"`
+
+	// Phase results
+	Results map[string]interface{} `json:"results"`
 }
 
 // saveJSON saves data as formatted JSON

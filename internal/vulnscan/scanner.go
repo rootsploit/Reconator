@@ -47,10 +47,10 @@ func NewScanner(cfg *config.Config, checker *tools.Checker) *Scanner {
 func (s *Scanner) Scan(hosts []string, categorizedURLs *historic.CategorizedURLs) (*Result, error) {
 	start := time.Now()
 	result := &Result{
-		TotalScanned:   len(hosts),
+		TotalScanned:    len(hosts),
 		Vulnerabilities: []Vulnerability{},
-		BySeverity:     make(map[string]int),
-		ByType:         make(map[string]int),
+		BySeverity:      make(map[string]int),
+		ByType:          make(map[string]int),
 	}
 
 	if len(hosts) == 0 {
@@ -67,7 +67,9 @@ func (s *Scanner) Scan(hosts []string, categorizedURLs *historic.CategorizedURLs
 	}
 	defer cleanup()
 
-	// Run nuclei with various template categories
+	// OPTIMIZATION: Run a single nuclei process for host-based scanning
+	// This avoids template reload overhead and thread explosion from multiple processes
+	// Nuclei's template clustering automatically optimizes requests to same endpoints
 	if s.c.IsInstalled("nuclei") {
 		wg.Add(1)
 		go func() {
@@ -81,7 +83,7 @@ func (s *Scanner) Scan(hosts []string, categorizedURLs *historic.CategorizedURLs
 		}()
 	}
 
-	// Run dalfox for XSS scanning on categorized XSS URLs
+	// Run dalfox for XSS scanning on categorized XSS URLs (parallel with nuclei)
 	if s.c.IsInstalled("dalfox") && categorizedURLs != nil && len(categorizedURLs.XSS) > 0 {
 		wg.Add(1)
 		go func() {
@@ -95,74 +97,42 @@ func (s *Scanner) Scan(hosts []string, categorizedURLs *historic.CategorizedURLs
 		}()
 	}
 
-	// Run nuclei on SQLi URLs with sqli-specific templates
-	if s.c.IsInstalled("nuclei") && categorizedURLs != nil && len(categorizedURLs.SQLi) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fmt.Println("        Running nuclei SQLi scan on categorized URLs...")
-			vulns := s.nucleiTargeted(categorizedURLs.SQLi, "sqli")
-			mu.Lock()
-			result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
-			mu.Unlock()
-			fmt.Printf("        nuclei-sqli: %d SQLi vulnerabilities found\n", len(vulns))
-		}()
-	}
+	// OPTIMIZATION: Single nuclei process for ALL categorized URLs with combined tags
+	// Instead of 5 separate nuclei processes (sqli, ssrf, lfi, ssti, rce), run one
+	// This reduces: 5 template loads → 1, thread explosion (5×50=250 → 50)
+	if s.c.IsInstalled("nuclei") && categorizedURLs != nil {
+		// Collect all categorized URLs into one list (deduplicated)
+		var allCategorizedURLs []string
+		urlSet := make(map[string]bool)
 
-	// Run nuclei on SSRF URLs
-	if s.c.IsInstalled("nuclei") && categorizedURLs != nil && len(categorizedURLs.SSRF) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fmt.Println("        Running nuclei SSRF scan on categorized URLs...")
-			vulns := s.nucleiTargeted(categorizedURLs.SSRF, "ssrf")
-			mu.Lock()
-			result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
-			mu.Unlock()
-			fmt.Printf("        nuclei-ssrf: %d SSRF vulnerabilities found\n", len(vulns))
-		}()
-	}
+		for _, urls := range [][]string{
+			categorizedURLs.SQLi,
+			categorizedURLs.SSRF,
+			categorizedURLs.LFI,
+			categorizedURLs.SSTI,
+			categorizedURLs.RCE,
+		} {
+			for _, u := range urls {
+				if !urlSet[u] {
+					urlSet[u] = true
+					allCategorizedURLs = append(allCategorizedURLs, u)
+				}
+			}
+		}
 
-	// Run nuclei on LFI URLs
-	if s.c.IsInstalled("nuclei") && categorizedURLs != nil && len(categorizedURLs.LFI) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fmt.Println("        Running nuclei LFI scan on categorized URLs...")
-			vulns := s.nucleiTargeted(categorizedURLs.LFI, "lfi")
-			mu.Lock()
-			result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
-			mu.Unlock()
-			fmt.Printf("        nuclei-lfi: %d LFI vulnerabilities found\n", len(vulns))
-		}()
-	}
-
-	// Run nuclei on SSTI URLs
-	if s.c.IsInstalled("nuclei") && categorizedURLs != nil && len(categorizedURLs.SSTI) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fmt.Println("        Running nuclei SSTI scan on categorized URLs...")
-			vulns := s.nucleiTargeted(categorizedURLs.SSTI, "ssti")
-			mu.Lock()
-			result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
-			mu.Unlock()
-			fmt.Printf("        nuclei-ssti: %d SSTI vulnerabilities found\n", len(vulns))
-		}()
-	}
-
-	// Run nuclei on RCE URLs
-	if s.c.IsInstalled("nuclei") && categorizedURLs != nil && len(categorizedURLs.RCE) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			fmt.Println("        Running nuclei RCE scan on categorized URLs...")
-			vulns := s.nucleiTargeted(categorizedURLs.RCE, "rce")
-			mu.Lock()
-			result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
-			mu.Unlock()
-			fmt.Printf("        nuclei-rce: %d RCE vulnerabilities found\n", len(vulns))
-		}()
+		if len(allCategorizedURLs) > 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				fmt.Printf("        Running nuclei targeted scan on %d categorized URLs...\n", len(allCategorizedURLs))
+				// Run single nuclei with combined tags
+				vulns := s.nucleiTargeted(allCategorizedURLs, "sqli,ssrf,lfi,ssti,rce,injection")
+				mu.Lock()
+				result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
+				mu.Unlock()
+				fmt.Printf("        nuclei-targeted: %d vulnerabilities found\n", len(vulns))
+			}()
+		}
 	}
 
 	wg.Wait()
@@ -226,12 +196,24 @@ func (s *Scanner) nucleiScan(hostsFile string) []Vulnerability {
 		args = append(args, "-tags", "cve,exposure,misconfig,default-login,tech")
 	}
 
+	// Performance tuning based on ProjectDiscovery recommendations
+	// -c: template concurrency (how many templates run in parallel)
+	// -bs: bulk-size (hosts analyzed per template in parallel)
+	// -rl: rate-limit (requests per second)
 	if s.cfg.Threads > 0 {
 		args = append(args, "-c", fmt.Sprintf("%d", s.cfg.Threads))
+		// Set bulk-size to match concurrency for optimal throughput
+		args = append(args, "-bs", fmt.Sprintf("%d", s.cfg.Threads))
+	} else {
+		// Defaults optimized for stability
+		args = append(args, "-c", "25", "-bs", "25")
 	}
 
 	if s.cfg.RateLimit > 0 {
 		args = append(args, "-rl", fmt.Sprintf("%d", s.cfg.RateLimit))
+	} else {
+		// Default rate limit to avoid overwhelming targets
+		args = append(args, "-rl", "300")
 	}
 
 	r := exec.Run("nuclei", args, &exec.Options{Timeout: 60 * time.Minute})

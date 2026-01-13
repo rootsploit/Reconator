@@ -23,7 +23,7 @@ func GoTools() []Tool {
 		{"subfinder", "subfinder", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest", true},
 		{"assetfinder", "assetfinder", "github.com/tomnomnom/assetfinder@latest", true},
 		{"cero", "cero", "github.com/glebarez/cero@latest", false}, // CT log subdomain discovery
-		{"github-subdomains", "github-subdomains", "github.com/gwen001/github-subdomains@latest", false}, // GitHub subdomain discovery
+		// Note: github-subdomains removed - subfinder with GitHub API keys handles this
 
 		// IP range to domain discovery
 		{"hakrevdns", "hakrevdns", "github.com/hakluke/hakrevdns@latest", false}, // Reverse DNS from IPs

@@ -1,348 +1,210 @@
+<h1 align="center">🔍 Reconator</h1>
+
 <p align="center">
-  <h1 align="center">Reconator</h1>
-  <p align="center">
-    <b>Fast reconnaissance tool for bug bounty hunters</b>
-  </p>
-  <p align="center">
-    Built in Go for easy installation and maximum speed
-  </p>
+  <img src="https://img.shields.io/badge/Reconator-AI--Powered%20Recon-blueviolet?style=for-the-badge&logo=target" alt="Reconator">
 </p>
 
 <p align="center">
   <a href="https://github.com/rootsploit/reconator/releases"><img src="https://img.shields.io/github/v/release/rootsploit/reconator?style=flat-square&color=blue" alt="Release"></a>
-  <a href="https://github.com/rootsploit/reconator/blob/main/LICENSE"><img src="https://img.shields.io/github/license/rootsploit/reconator?style=flat-square&color=green" alt="License"></a>
+  <a href="https://github.com/rootsploit/reconator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License"></a>
   <a href="https://goreportcard.com/report/github.com/rootsploit/reconator"><img src="https://goreportcard.com/badge/github.com/rootsploit/reconator?style=flat-square" alt="Go Report Card"></a>
-  <a href="https://github.com/rootsploit/reconator/stargazers"><img src="https://img.shields.io/github/stars/rootsploit/reconator?style=flat-square&color=yellow" alt="Stars"></a>
-  <a href="https://twitter.com/RootSploit"><img src="https://img.shields.io/twitter/follow/RootSploit?style=flat-square&color=1DA1F2&logo=twitter" alt="Twitter"></a>
+  <img src="https://img.shields.io/badge/go-%3E%3D1.21-00ADD8?style=flat-square&logo=go" alt="Go Version">
 </p>
 
 <p align="center">
-  <a href="#features">Features</a> •
-  <a href="#installation">Installation</a> •
-  <a href="#usage">Usage</a> •
-  <a href="#pipeline-phases">Phases</a> •
-  <a href="#configuration">Configuration</a>
+  <a href="docs/USAGE.md">Documentation</a> •
+  <a href="#-features">Features</a> •
+  <a href="#-installation">Install</a> •
+  <a href="#-quick-start">Quick Start</a> •
+  <a href="#-comparison">Comparison</a>
 </p>
 
 ---
 
-## Overview
+## Reconator
 
-**Reconator** is a streamlined reconnaissance framework that combines multiple best-in-class tools into a single automated pipeline. It runs passive enumeration, DNS bruteforce, port scanning, vulnerability scanning, and AI-guided analysis in parallel for maximum speed.
+Reconator is a reconnaissance framework that combines subdomain enumeration, port scanning, and vulnerability detection into a single automated pipeline. It uses AI to analyze findings and recommend targeted security tests.
 
-Created by [@RootSploit](https://twitter.com/RootSploit)
-
----
-
-## Features
-
-| Feature | Description |
-|---------|-------------|
-| **10-Phase Pipeline** | Complete reconnaissance from subdomain enumeration to vulnerability scanning |
-| **Multiple Input Types** | Supports domains, IPs, CIDR ranges, ASNs |
-| **Passive Mode** | Stealth reconnaissance without active scanning |
-| **AI-Guided Scanning** | CVEMap integration + AI recommendations for smart nuclei template selection |
-| **Real-time Alerts** | Notifications via Slack, Discord, Telegram using ProjectDiscovery notify |
-| **Cross-Platform** | Linux, macOS, Windows support |
+- 🧠 **AI-Powered Analysis** - GPT-4/Claude/Gemini analyzes your target and recommends specific nuclei templates
+- 📊 **Risk Scoring** - 0-100 attack surface score with prioritized findings
+- 🎯 **CVEMap Integration** - Real CVE data mapped to detected technologies
+- 💡 **Manual Check Suggestions** - AI suggests SQLi/XSS tests even when automated tools miss them
+- ⚡ **Easy to Install** - Single Go binary, run `reconator install --extras` to set up all dependencies
 
 ---
 
-## Installation
+## ✨ Features
+
+### 🎯 Core Capabilities
+
+- 🕵️ **Subdomain Enumeration** - subfinder, amass, assetfinder, crt.sh, chaos (30+ sources)
+- 🌐 **DNS Resolution** - Fast validation with puredns & dnsx
+- ⚡ **Port Scanning** - naabu for speed, httpx for HTTP validation
+- 🔍 **Web Crawling** - katana, waybackurls, gau for endpoint discovery
+- 🛡️ **WAF/CDN Detection** - Identifies Cloudflare, Akamai + origin IP discovery
+- 🎭 **Tech Fingerprinting** - Wappalyzer-based technology detection
+- ☠️ **Subdomain Takeover** - subjack, subzy for dangling DNS detection
+
+### 🤖 AI-Powered Intelligence
+
+- 🧠 **Smart Template Selection** - AI analyzes tech stack and picks relevant nuclei templates
+- 📋 **CVE Mapping** - Maps detected technologies to known CVEs via CVEMap
+- 📊 **Risk Scoring** - 0-100 risk score based on attack surface analysis
+- 💡 **Manual Test Suggestions** - Recommends SQLi/XSS tests even when automation fails
+- 📝 **Attack Surface Report** - Prioritized findings with effort/impact ratings
+
+### 🔐 Advanced Secrets Scanner
+
+- 🔑 **50+ Token Patterns** - Comprehensive regex-based detection
+  - **Cloud**: AWS, GCP, Azure, DigitalOcean, Heroku, Cloudflare
+  - **Code**: GitHub PAT/OAuth, GitLab, NPM, PyPI tokens
+  - **Payment**: Stripe, Square, PayPal, Braintree API keys
+  - **Communication**: Slack, Discord, Telegram, Twilio
+  - **AI Services**: OpenAI, Anthropic, Cohere API keys
+  - **Generic**: Private keys, JWTs, Database URLs, OAuth secrets
+
+### ☁️ Cloud Storage Security
+
+- 🪣 **S3 Bucket Testing** - Multi-region discovery + permission testing
+- 📦 **GCS & Azure Blob** - Bucket enumeration + access verification
+- 🔄 **Auto Name Generation** - Creates bucket permutations from target domain
+
+### 🚪 Admin Panel Discovery
+
+- 🔍 **25+ Admin Paths** - `/admin`, `/wp-admin`, `/phpmyadmin`, `/jenkins`, `/grafana`
+- 🔐 **Login Form Detection** - Identifies auth types and login pages
+- 📄 **Title Extraction** - Grabs page titles for quick identification
+
+### ⚛️ GraphQL Detection
+
+- 🔗 **16 Common Paths** - `/graphql`, `/graphiql`, `/playground`, `/v1/graphql`
+- 🔓 **Introspection Testing** - Checks if schema is exposed
+- 🎯 **Nuclei Integration** - Runs GraphQL-specific vulnerability templates
+
+### 📸 Visual Recon
+
+- 🖼️ **Screenshot Capture** - gowitness integration for visual evidence
+- ⚡ **Parallel Processing** - Fast screenshot collection across all hosts
+
+### 🕵️ OSINT Module
+
+- 🔎 **Google Dork Generator** - 15 dork categories with clickable links
+- 🆓 **No API Required** - Works without external API keys
+
+### 📊 Reporting
+
+- 📈 **HTML Dashboard** - Modern, responsive report
+- 📋 **Executive Summary** - Key metrics at a glance
+- ⚠️ **Vulnerability Breakdown** - Critical/High findings highlighted
+
+---
+
+## 📦 Installation
 
 ```bash
-# Install reconator
+# Install Reconator
 go install github.com/rootsploit/reconator@latest
 
-# Install all required dependencies
-reconator install
-
-# Install optional extras (Python/Rust tools)
+# Install all dependencies
 reconator install --extras
-
-# Verify installation
-reconator check
 ```
 
-The installer automatically:
-- Detects your OS and architecture
-- Uses appropriate package manager (apt, brew, dnf, pacman, choco)
-- Installs system dependencies (libpcap, nmap)
-- Downloads nuclei-templates
-- Downloads DNS resolvers and wordlists
+### From Source
 
-### Cross-Platform Support
-
-| OS | Package Manager | Status |
-|----|-----------------|--------|
-| Ubuntu/Debian | apt | Full support |
-| macOS | brew | Full support |
-| Fedora/RHEL | dnf/yum | Full support |
-| Arch Linux | pacman | Full support |
-| Alpine | apk | Full support |
-| Windows | choco/winget | Partial (some tools need WSL) |
+```bash
+git clone https://github.com/rootsploit/reconator.git
+cd reconator
+go build -o reconator
+```
 
 ---
 
-## Usage
-
-### Basic Scan
+## 🚀 Quick Start
 
 ```bash
-# Single domain
-reconator scan example.com
+# Basic scan
+reconator scan target.com
 
-# Multiple domains from file
-reconator scan -l domains.txt
-
-# Custom output directory
-reconator scan example.com -o ./output
-```
-
-### IP Range Input
-
-```bash
-# Scan IP address (discovers domains via reverse DNS + certs)
-reconator scan 192.168.1.1
-
-# Scan CIDR range
-reconator scan 10.0.0.0/24
-```
-
-### ASN Input
-
-```bash
-# Scan by ASN (discovers CIDR ranges + domains via asnmap)
-reconator scan AS13335
-
-# Also accepts without AS prefix
-reconator scan 15169
-```
-
-### Phase Selection
-
-```bash
-# Run all phases (default)
-reconator scan example.com -p all
-
-# Run specific phases
-reconator scan example.com -p subdomain,ports,takeover
-
-# Available: subdomain, waf, ports, takeover, historic, tech, dirbrute, vulnscan, aiguided
-```
-
-### Mode Options
-
-```bash
-# Passive mode - no active scanning, no port scanning, no crawling
-reconator scan example.com --passive
-
-# Skip specific phases
-reconator scan example.com --skip-dirbrute --skip-vulnscan --skip-aiguided
-
-# Debug mode - detailed timing logs
-reconator scan example.com --debug
-```
-
-### Performance Tuning
-
-```bash
-# Set concurrency (subfinder, naabu, httpx, katana)
-reconator scan example.com -c 100
-
-# Set DNS threads (puredns/dnsx)
-reconator scan example.com --dns-threads 200
-
-# Set rate limit for port scanning
-reconator scan example.com -r 50
-
-# Skip DNS validation (faster but less accurate)
-reconator scan example.com --skip-validation
-```
-
-### AI-Guided Scanning
-
-```bash
-# Set API keys via environment variables
+# With AI analysis
 export OPENAI_API_KEY="sk-..."
-export ANTHROPIC_API_KEY="sk-ant-..."
-export GEMINI_API_KEY="..."
+reconator scan target.com
 
-# Or via flags
-reconator scan example.com --openai-key "sk-..."
-```
+# Full featured scan
+reconator scan target.com --screenshots --graphql --osint
 
-### Notifications
+# Multiple targets
+reconator scan -l targets.txt
 
-```bash
-# Enable notifications
-reconator scan example.com --notify
-
-# Custom notify config
-reconator scan example.com --notify --notify-config ~/.config/notify/provider-config.yaml
+# Passive mode
+reconator scan target.com --passive
 ```
 
 ---
 
-## Pipeline Phases
+## 📊 Comparison
 
-| Phase | Name | Description | Tools |
-|:-----:|------|-------------|-------|
-| 0 | **IP/ASN Discovery** | Discover domains from IP/CIDR/ASN via reverse DNS + certs | asnmap, cero, hakrevdns, hakip2host, mapcidr |
-| 1 | **Subdomain Enumeration** | Passive sources + DNS bruteforce + permutations + validation | subfinder, assetfinder, findomain, puredns, alterx, mksub |
-| 2 | **WAF/CDN Detection** | Identify CDN-protected vs direct hosts, origin IP discovery | cdncheck, cf-hero, hakoriginfinder |
-| 3 | **Port Scanning** | Port discovery + HTTP probing + TLS analysis | naabu, httpx, tlsx |
-| 4 | **Subdomain Takeover** | Detect vulnerable subdomains | subjack, nuclei (takeover templates), subzy |
-| 5 | **Historic URLs** | Archive URL collection + subdomain extraction + URL categorization | waybackurls, gau, waymore, katana, urlfinder, gf |
-| 6 | **Technology Detection** | Fingerprint web technologies | wappalyzergo library |
-| 7 | **Directory Bruteforce** | Content discovery | feroxbuster, ffuf |
-| 8 | **Vulnerability Scanning** | CVE + vulnerability templates + XSS scanning | nuclei, dalfox |
-| 9 | **AI-Guided Scanning** | Smart template selection via CVEMap + AI | cvemap, nuclei + OpenAI/Claude/Gemini |
-| 10 | **Alerting** | Send notifications for findings | notify (Slack, Discord, Telegram) |
-
----
-
-## Output Structure
-
-```
-results/
-└── example.com/
-    ├── summary.json
-    ├── 0-iprange/
-    │   ├── ip_discovery.json
-    │   ├── ips.txt
-    │   └── domains.txt
-    ├── 1-subdomains/
-    │   ├── subdomains.json
-    │   ├── subdomains.txt          # Validated subdomains
-    │   └── all_subdomains.txt      # All discovered
-    ├── 2-waf/
-    │   ├── waf_detection.json
-    │   ├── cdn_hosts.txt
-    │   └── direct_hosts.txt
-    ├── 3-ports/
-    │   ├── port_scan.json
-    │   ├── open_ports.txt
-    │   ├── alive_hosts.txt
-    │   └── tls_info.json
-    ├── 4-takeover/
-    │   ├── takeover.json
-    │   └── vulnerable.txt
-    ├── 5-historic/
-    │   ├── historic_urls.json
-    │   ├── urls.txt
-    │   ├── interesting_urls.txt
-    │   └── endpoints.txt
-    ├── 6-tech/
-    │   ├── tech_detection.json
-    │   ├── tech_by_host.txt
-    │   └── tech_summary.txt
-    ├── 7-dirbrute/
-    │   ├── dirbrute.json
-    │   └── discoveries.txt
-    ├── 8-vulnscan/
-    │   ├── vulnerabilities.json
-    │   ├── critical.txt
-    │   ├── high.txt
-    │   └── all_vulnerabilities.txt
-    └── 9-aiguided/
-        ├── ai_guided.json
-        ├── ai_recommendations.txt
-        └── ai_vulnerabilities.txt
-```
+| Feature | Reconator | reconFTW | FinalRecon |
+|---------|:---------:|:--------:|:----------:|
+| **AI Analysis** | ✅ GPT-4/Claude/Gemini | ❌ | ❌ |
+| **CVE Intelligence** | ✅ CVEMap | nuclei only | ❌ |
+| **Risk Scoring** | ✅ 0-100 | ❌ | ❌ |
+| **Secret Detection** | ✅ 50+ patterns | JS only | ❌ |
+| **Cloud Storage** | ✅ S3/GCS/Azure | S3 only | ❌ |
+| **Admin Panels** | ✅ 25+ paths | ❌ | Dir brute |
+| **GraphQL Detection** | ✅ 16 paths | ❌ | ❌ |
+| **Screenshot Capture** | ✅ gowitness | gowitness | ❌ |
+| **OSINT Dorks** | ✅ 15 categories | ✅ | ❌ |
+| **HTML Reports** | ✅ | ✅ | ❌ |
+| **Subdomain Sources** | 30+ | 30+ | 10+ |
+| **Single Binary** | ✅ Go | Bash scripts | Python |
 
 ---
 
-## Tools
+## 🖥️ Platform Support
 
-### Required (installed via `reconator install`)
-
-| Tool | Purpose |
-|------|---------|
-| subfinder | Subdomain discovery (30+ passive sources) |
-| assetfinder | Additional subdomain discovery |
-| puredns | DNS bruteforce and validation |
-| dnsx | DNS toolkit |
-| alterx | Subdomain permutation |
-| mksub | Permutation generator |
-| dsieve | Domain filtering |
-| httpx | HTTP probing |
-| naabu | Port scanning |
-| tlsx | TLS certificate analysis |
-| cdncheck | CDN/WAF detection |
-| nuclei | Vulnerability scanning |
-| waybackurls | Wayback Machine URLs |
-| gau | Get All URLs |
-| urlfinder | Passive URL discovery |
-| katana | Active web crawling |
-| ffuf | Fuzzing / directory bruteforce |
-| massdns | High-performance DNS resolver |
-
-### Optional (installed via `reconator install --extras`)
-
-| Tool | Type | Purpose |
-|------|:----:|---------|
-| cero | Go | CT log subdomain discovery |
-| github-subdomains | Go | GitHub subdomain discovery |
-| hakrevdns | Go | Reverse DNS from IPs |
-| hakip2host | Go | IP to hostname resolution |
-| mapcidr | Go | CIDR expansion |
-| asnmap | Go | ASN to CIDR/domain discovery |
-| favirecon | Go | Favicon hash reconnaissance |
-| subzy | Go | Subdomain takeover detection |
-| subjack | Go | Subdomain takeover detection |
-| gf | Go | URL pattern matching |
-| qsreplace | Go | Query string replacement |
-| dalfox | Go | XSS scanner |
-| hakoriginfinder | Go | Cloudflare bypass |
-| cf-hero | Go | Cloudflare origin finder (multiple methods) |
-| cvemap | Go | CVE lookup by technology |
-| notify | Go | Notifications (Slack, Discord, etc.) |
-| waymore | Python | Extended wayback sources |
-| xnLinkFinder | Python | JS endpoint extraction |
-| findomain | Rust | Fast subdomain enumeration |
-| feroxbuster | Rust | Fast directory bruteforce |
+| Platform | Status |
+|----------|:------:|
+| Linux (Ubuntu, Debian, Fedora, Arch) | ✅ Full |
+| macOS (Intel + Apple Silicon) | ✅ Full |
+| Windows (WSL recommended) | ⚠️ Partial |
 
 ---
 
-## Configuration
-
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for detailed configuration including:
-- API key setup (subfinder, chaos, securitytrails, shodan)
-- Notification configuration (Slack, Discord, Telegram)
-- AI provider setup (OpenAI, Claude, Gemini)
-- Custom wordlists and resolvers
-
----
-
-## Credits
+## 🙏 Credits
 
 Built with tools from:
-- [ProjectDiscovery](https://github.com/projectdiscovery) - subfinder, httpx, dnsx, naabu, nuclei, katana, cdncheck, cvemap, asnmap, notify
-- [Trickest](https://github.com/trickest) - mksub, dsieve
-- [d3mondev/puredns](https://github.com/d3mondev/puredns)
-- [tomnomnom](https://github.com/tomnomnom) - assetfinder, waybackurls, gf
-- [lc/gau](https://github.com/lc/gau)
-- [hahwul/dalfox](https://github.com/hahwul/dalfox)
-- [epi052/feroxbuster](https://github.com/epi052/feroxbuster)
+- [ProjectDiscovery](https://github.com/projectdiscovery) - nuclei, subfinder, httpx, naabu, katana
+- [tomnomnom](https://github.com/tomnomnom) - waybackurls, assetfinder
+- [hahwul](https://github.com/hahwul) - dalfox
+- [OWASP](https://github.com/OWASP) - amass
+- [sensepost](https://github.com/sensepost) - gowitness
 
 ---
 
-## Legal Disclaimer
+## 🤝 Contributing
 
-This tool is for **authorized security testing** and **bug bounty programs** only. Users are responsible for compliance with applicable laws. Unauthorized testing is illegal.
+Contributions are welcome!
 
-**Always obtain proper authorization before testing.**
+1. Fork the repository
+2. Create your feature branch
+3. Submit a pull request
+
+**Found this useful?** A star helps others discover Reconator.
 
 ---
 
-## License
+## ⚖️ Legal
 
-MIT License - See [LICENSE](LICENSE) for details.
+**For authorized security testing only.** Always obtain written authorization before scanning.
+
+---
+
+## 📄 License
+
+AGPL-3.0 - See [LICENSE](LICENSE)
 
 ---
 
 <p align="center">
-  <b>Reconator</b> - Fast reconnaissance for bug bounty hunters
-  <br>
-  Created by <a href="https://twitter.com/RootSploit">@RootSploit</a>
+  <b>Created by <a href="https://twitter.com/RootSploit">@RootSploit</a></b>
 </p>

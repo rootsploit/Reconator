@@ -29,6 +29,12 @@ func init() {
 	scanCmd.Flags().BoolVar(&cfg.PassiveMode, "passive", false, "Passive mode: skip active tools (port scan, katana, wappalyzer)")
 	scanCmd.Flags().StringVar(&cfg.FaviconHash, "favicon-hash", "", "Favicon hash for favirecon reconnaissance")
 	scanCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Show detailed timing logs for each tool execution")
+
+	// New features
+	scanCmd.Flags().BoolVar(&cfg.EnableScreenshots, "screenshots", false, "Enable screenshot capture (gowitness)")
+	scanCmd.Flags().BoolVar(&cfg.EnableGraphQL, "graphql", false, "Enable GraphQL endpoint detection")
+	scanCmd.Flags().BoolVar(&cfg.EnableOSINT, "osint", false, "Enable OSINT (Google Dorks generation)")
+	scanCmd.Flags().BoolVar(&cfg.GenerateReport, "report", true, "Generate HTML report")
 }
 
 func runScan(cmd *cobra.Command, args []string) error {

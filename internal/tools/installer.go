@@ -520,16 +520,24 @@ func (i *Installer) InstallSystemTool(name string) error {
 // InstallNucleiTemplates clones or updates nuclei templates
 func (i *Installer) InstallNucleiTemplates() error {
 	templatesDir := filepath.Join(i.platform.HomeDir, "nuclei-templates")
+	gitDir := filepath.Join(templatesDir, ".git")
 
-	// Check if templates already exist
+	// Check if templates directory exists
 	if _, err := os.Stat(templatesDir); err == nil {
-		// Templates exist, update them
-		cmd := exec.Command("git", "-C", templatesDir, "pull", "--quiet")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("update failed: %s", strings.TrimSpace(string(out)))
+		// Check if it's actually a git repository
+		if _, err := os.Stat(gitDir); err == nil {
+			// It's a git repo, update it
+			cmd := exec.Command("git", "-C", templatesDir, "pull", "--quiet")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("update failed: %s", strings.TrimSpace(string(out)))
+			}
+			return nil
 		}
-		return nil
+		// Directory exists but not a git repo - remove and re-clone
+		if err := os.RemoveAll(templatesDir); err != nil {
+			return fmt.Errorf("failed to remove existing directory: %v", err)
+		}
 	}
 
 	// Clone templates
