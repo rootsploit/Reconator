@@ -264,6 +264,17 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Step 7: Check Chrome for screenshots
+	fmt.Println("\n[*] Checking Chrome (required for screenshots)...")
+	chromeInfo := installer.CheckChrome()
+	if chromeInfo.Installed {
+		green.Printf("    ✓ Chrome: %s\n", chromeInfo.Version)
+		gray.Printf("      Path: %s\n", chromeInfo.Path)
+	} else {
+		yellow.Println("    ○ Chrome: not found (required for gowitness screenshots)")
+		yellow.Printf("      %s\n", installer.GetChromeInstallInstructions())
+	}
+
 	// Summary
 	elapsed := time.Since(startTime).Round(time.Second)
 	fmt.Println()

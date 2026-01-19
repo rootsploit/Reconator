@@ -83,6 +83,9 @@ func GoTools() []Tool {
 		// XSS scanning
 		{"dalfox", "dalfox", "github.com/hahwul/dalfox/v2@latest", false},
 
+		// Screenshots
+		{"gowitness", "gowitness", "github.com/sensepost/gowitness@latest", false},
+
 		// Cloudflare bypass
 		{"hakoriginfinder", "hakoriginfinder", "github.com/hakluke/hakoriginfinder@latest", false},
 		{"cf-hero", "cf-hero", "github.com/musana/cf-hero/cmd/cf-hero@latest", false}, // Cloudflare origin finder (multiple methods)

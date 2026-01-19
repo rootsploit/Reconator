@@ -13,7 +13,6 @@
 
 <p align="center">
   <a href="docs/USAGE.md">Documentation</a> •
-  <a href="docs/CONFIGURATION.md">Configuration</a> •
   <a href="#-features">Features</a> •
   <a href="#-installation">Install</a> •
   <a href="#-quick-start">Quick Start</a> •
@@ -26,7 +25,7 @@
 
 Reconator is a reconnaissance framework that combines subdomain enumeration, port scanning, and vulnerability detection into a single automated pipeline. It uses AI to analyze findings and recommend targeted security tests.
 
-- 🧠 **AI-Powered Analysis** - GPT-4/Claude/Gemini analyzes your target and recommends specific nuclei templates
+- 🧠 **AI-Powered Analysis** - Multi-provider AI (Ollama/Groq/DeepSeek/Claude/OpenAI/Gemini) with auto key rotation
 - 📊 **Risk Scoring** - 0-100 attack surface score with prioritized findings
 - 🎯 **CVEMap Integration** - Real CVE data mapped to detected technologies
 - 💡 **Manual Check Suggestions** - AI suggests SQLi/XSS tests even when automated tools miss them
@@ -94,20 +93,46 @@ Reconator is a reconnaissance framework that combines subdomain enumeration, por
 
 ### 📊 Reporting
 
-- 📈 **HTML Dashboard** - Modern, responsive report
+- 📈 **HTML Dashboard** - Modern, responsive report with dark theme
 - 📋 **Executive Summary** - Key metrics at a glance
 - ⚠️ **Vulnerability Breakdown** - Critical/High findings highlighted
+- 🔍 **Per-Subdomain View** - Ports, tech, vulns per host with search/filter
+- 🔗 **Attack Chain Analysis** - AI-identified vulnerability chains
+- 📊 **Prioritized Findings** - Ranked by exploitability
 
 ---
 
 ## 📦 Installation
 
+### Quick Install (Recommended)
+
 ```bash
-# Install Reconator
-go install github.com/rootsploit/reconator@latest
+# One-liner install script (Linux/macOS)
+curl -sSfL https://raw.githubusercontent.com/rootsploit/reconator/main/scripts/install.sh | bash
 
 # Install all dependencies
 reconator install --extras
+```
+
+### Using Go
+
+```bash
+go install github.com/rootsploit/reconator@latest
+reconator install --extras
+```
+
+### From Releases
+
+Download pre-built binaries from [GitHub Releases](https://github.com/rootsploit/reconator/releases).
+
+### Docker
+
+```bash
+# Pull from Docker Hub
+docker pull rootsploit/reconator:latest
+
+# Run a scan
+docker run --rm -v $(pwd)/results:/home/reconator/results rootsploit/reconator scan target.com
 ```
 
 ### From Source
@@ -115,7 +140,8 @@ reconator install --extras
 ```bash
 git clone https://github.com/rootsploit/reconator.git
 cd reconator
-go build -o reconator
+go build -o reconator ./cmd/reconator
+./reconator install --extras
 ```
 
 ---

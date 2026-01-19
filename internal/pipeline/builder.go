@@ -37,6 +37,7 @@ func (b *Builder) Build(ctx context.Context, phase Phase) (*PhaseInput, error) {
 		if err := b.loadPhaseData(ctx, dep, input); err != nil {
 			// Dependencies are soft - phase can run with partial data
 			// Log but don't fail
+			fmt.Printf("        [Builder] Could not load %s data: %v\n", dep, err)
 			continue
 		}
 	}
@@ -76,8 +77,10 @@ func (b *Builder) loadPhaseData(ctx context.Context, phase Phase, input *PhaseIn
 
 	data, err := b.storage.Read(ctx, path)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load %s data from %s: %w", phase, path, err)
 	}
+
+	fmt.Printf("        [Builder] Loaded existing %s data from %s\n", phase, path)
 
 	// Parse based on phase type
 	switch phase {

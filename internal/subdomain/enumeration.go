@@ -161,6 +161,21 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 			fmt.Printf("        mksub: %d\n", mksubCount)
 		}
 
+		// AI-powered permutations (uses LLM to analyze patterns)
+		var aiPermCount int
+		hasAIKeys := e.cfg.OpenAIKey != "" || e.cfg.ClaudeKey != "" || e.cfg.GeminiKey != ""
+		if hasAIKeys && len(current) >= 5 { // Need at least 5 subdomains for pattern analysis
+			aiPerm := NewAIPermutator(e.cfg)
+			aiPerms, err := aiPerm.GenerateSmartPermutations(domain, current)
+			if err == nil && len(aiPerms) > 0 {
+				aiPermCount = len(aiPerms)
+				for _, s := range aiPerms {
+					permSet[s] = true
+				}
+				fmt.Printf("        ai_permutation: %d\n", aiPermCount)
+			}
+		}
+
 		// Convert to slice and filter with dsieve
 		var permuted []string
 		for s := range permSet {
@@ -178,6 +193,7 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		// Record counts
 		result.Sources["alterx"] = alterxCount
 		result.Sources["mksub"] = mksubCount
+		result.Sources["ai_permutation"] = aiPermCount
 		result.Sources["permutations"] = len(permuted)
 
 		for _, s := range permuted {
@@ -210,11 +226,26 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		fmt.Printf("        validated: %d alive\n", len(validated))
 	}
 
+	// Dedupe and sort validated subdomains
+	validated = uniqueStrings(validated)
 	sort.Strings(validated)
 	result.Subdomains = validated
 	result.Total = len(validated)
 	result.Duration = time.Since(start)
 	return result, nil
+}
+
+// uniqueStrings removes duplicates from a slice of strings
+func uniqueStrings(s []string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, v := range s {
+		if !seen[v] {
+			seen[v] = true
+			result = append(result, v)
+		}
+	}
+	return result
 }
 
 func (e *Enumerator) subfinder(domain string) []string {

@@ -233,20 +233,51 @@ reconator scan example.com --skip-validation
 
 ## AI-Guided Scanning
 
-### Setting API Keys
+### Multi-Provider AI Support
 
-**Via Environment Variables (Recommended)**
+Reconator supports multiple AI providers with automatic failover and key rotation:
+
+| Priority | Provider | Model | Notes |
+|:--------:|----------|-------|-------|
+| 1 | Ollama | qwen2.5:32b | Local, free, private |
+| 2 | Groq | llama-3.1-70b | Fast, generous free tier |
+| 3 | DeepSeek | deepseek-chat | Cheap, good quality |
+| 4 | Claude | claude-sonnet-4 | Best for security analysis |
+| 5 | OpenAI | gpt-4o-mini | Reliable fallback |
+| 6 | Gemini | gemini-1.5-flash | Google AI |
+
+### Configuration
+
+**Option 1: Config File (Recommended)**
+
+Create `~/.reconator/ai-config.yaml`:
+
+```yaml
+providers:
+  - name: ollama
+    endpoint: "http://localhost:11434"
+    model: "qwen2.5:32b"
+    keys: []
+
+  - name: groq
+    keys: ["gsk_YOUR_KEY"]
+    model: "llama-3.1-70b-versatile"
+    rpm_limit: 30
+
+  - name: claude
+    keys: ["sk-ant-YOUR_KEY"]
+    model: "claude-sonnet-4-20250514"
+    rpm_limit: 50
+```
+
+**Option 2: Environment Variables**
 
 ```bash
 export OPENAI_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
 export GEMINI_API_KEY="..."
-```
-
-**Via Command Flags**
-
-```bash
-reconator scan example.com --openai-key "sk-..."
+export GROQ_API_KEY="gsk_..."
+export DEEPSEEK_API_KEY="sk-..."
 ```
 
 ### How It Works
@@ -256,6 +287,8 @@ reconator scan example.com --openai-key "sk-..."
 3. Uses AI to analyze context and recommend nuclei templates
 4. Runs targeted scans based on AI recommendations
 5. Generates attack surface report with risk score (0-100)
+6. Identifies vulnerability chains for combined exploitation
+7. Auto-rotates API keys on rate limit (429 errors)
 
 ---
 

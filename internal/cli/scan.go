@@ -3,38 +3,97 @@ package cli
 import (
 	"fmt"
 
+	"github.com/rootsploit/reconator/internal/aiguided"
 	"github.com/rootsploit/reconator/internal/runner"
 	"github.com/spf13/cobra"
+)
+
+// Opt-out flags (features are enabled by default)
+var (
+	noScreenshots bool
+	noGraphQL     bool
+	noOSINT       bool
+	noAI          bool
+	noReport      bool
+	noSQLite      bool
+	noResume      bool // Disable auto-resume of interrupted scans
+	useLegacy     bool // Use legacy procedural runner instead of pipeline
 )
 
 var scanCmd = &cobra.Command{
 	Use:   "scan [domain]",
 	Short: "Run reconnaissance on a target domain",
-	Long:  `Run reconnaissance phases on a target domain or list of domains.`,
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runScan,
+	Long: `Run reconnaissance phases on a target domain or list of domains.
+
+Uses pipeline executor by default for parallel phase execution and better performance.
+Interrupted scans are automatically resumed from where they left off (use --no-resume to disable).
+Use --parallel-targets N to scan multiple targets concurrently (useful with -l targets.txt).
+All features are enabled by default. Use --no-* flags to disable specific features.
+Use --quick for a fast scan that skips slow phases (dir bruteforce, full vuln scan).
+Use --passive for passive-only reconnaissance (no active probing).
+Use --legacy to use the procedural runner instead of the pipeline executor.`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runScan,
 }
 
 func init() {
+	// Target options
 	scanCmd.Flags().StringVarP(&cfg.TargetFile, "list", "l", "", "File containing list of domains")
 	scanCmd.Flags().StringVarP(&cfg.OutputDir, "output", "o", "./results", "Output directory")
+
+	// Phase selection
 	scanCmd.Flags().StringSliceVarP(&cfg.Phases, "phases", "p", []string{"all"}, "Phases to run (subdomain,waf,ports,takeover,historic,tech,all)")
 	scanCmd.Flags().BoolVar(&cfg.SkipValidation, "skip-validation", false, "Skip DNS validation")
-	scanCmd.Flags().IntVarP(&cfg.Threads, "threads", "c", 50, "Number of concurrent threads")
-	scanCmd.Flags().IntVar(&cfg.DNSThreads, "dns-threads", 100, "Threads for DNS resolution")
-	scanCmd.Flags().IntVarP(&cfg.RateLimit, "rate", "r", 0, "Rate limit (requests per second)")
+
+	// Performance (auto-detected based on system resources, override if needed)
+	scanCmd.Flags().IntVarP(&cfg.Threads, "threads", "c", 0, "Concurrent threads (0=auto-detect)")
+	scanCmd.Flags().IntVar(&cfg.DNSThreads, "dns-threads", 0, "DNS resolution threads (0=auto-detect)")
+	scanCmd.Flags().IntVarP(&cfg.RateLimit, "rate", "r", 0, "Rate limit requests/sec (0=auto-detect)")
+	scanCmd.Flags().IntVar(&cfg.MaxConcTargets, "parallel-targets", 0, "Parallel targets to scan (0=auto-detect)")
+
+	// Tool options
 	scanCmd.Flags().BoolVar(&cfg.UseOptional, "use-optional", true, "Use optional tools if available")
 	scanCmd.Flags().StringVar(&cfg.ResolversFile, "resolvers", "", "Custom resolvers file")
 	scanCmd.Flags().StringVar(&cfg.WordlistFile, "wordlist", "", "Custom wordlist for bruteforce")
-	scanCmd.Flags().BoolVar(&cfg.PassiveMode, "passive", false, "Passive mode: skip active tools (port scan, katana, wappalyzer)")
 	scanCmd.Flags().StringVar(&cfg.FaviconHash, "favicon-hash", "", "Favicon hash for favirecon reconnaissance")
+
+	// AI options (Ollama for local AI)
+	scanCmd.Flags().StringVar(&cfg.OllamaURL, "ollama-url", "", "Ollama server URL (default: http://localhost:11434)")
+	scanCmd.Flags().StringVar(&cfg.OllamaModel, "ollama-model", "", "Ollama model name (e.g., llama3.2, mistral, codellama)")
+
+	// Scan modes
+	scanCmd.Flags().BoolVar(&cfg.PassiveMode, "passive", false, "Passive mode: skip active tools (port scan, katana, wappalyzer)")
+	scanCmd.Flags().BoolVar(&cfg.QuickMode, "quick", false, "Quick mode: skip slow phases (dir bruteforce, full vuln scan)")
+	scanCmd.Flags().BoolVar(&useLegacy, "legacy", false, "Use legacy procedural runner instead of pipeline")
+
+	// Vulnerability scanning options
+	scanCmd.Flags().BoolVar(&cfg.DeepScan, "deep", false, "Deep vuln scan: run all nuclei templates (~30 min)")
+	scanCmd.Flags().StringVar(&cfg.NucleiTags, "nuclei-tags", "", "Custom nuclei tags (comma-separated, e.g., 'cve,rce,sqli')")
+	scanCmd.Flags().IntVar(&cfg.NucleiTimeout, "nuclei-timeout", 0, "Nuclei timeout in minutes (default: 10 fast, 30 deep)")
+
+	// Debug
 	scanCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Show detailed timing logs for each tool execution")
 
-	// New features
-	scanCmd.Flags().BoolVar(&cfg.EnableScreenshots, "screenshots", false, "Enable screenshot capture (gowitness)")
-	scanCmd.Flags().BoolVar(&cfg.EnableGraphQL, "graphql", false, "Enable GraphQL endpoint detection")
-	scanCmd.Flags().BoolVar(&cfg.EnableOSINT, "osint", false, "Enable OSINT (Google Dorks generation)")
-	scanCmd.Flags().BoolVar(&cfg.GenerateReport, "report", true, "Generate HTML report")
+	// Opt-out flags (features enabled by default, use these to disable)
+	scanCmd.Flags().BoolVar(&noScreenshots, "no-screenshots", false, "Disable screenshot capture")
+	scanCmd.Flags().BoolVar(&noGraphQL, "no-graphql", false, "Disable GraphQL endpoint detection")
+	scanCmd.Flags().BoolVar(&noOSINT, "no-osint", false, "Disable OSINT (Google Dorks generation)")
+	scanCmd.Flags().BoolVar(&noAI, "no-ai", false, "Disable AI-guided scanning")
+	scanCmd.Flags().BoolVar(&noReport, "no-report", false, "Disable HTML report generation")
+	scanCmd.Flags().BoolVar(&noSQLite, "no-sqlite", false, "Disable SQLite persistence (files only)")
+	scanCmd.Flags().BoolVar(&noResume, "no-resume", false, "Disable auto-resume of interrupted scans")
+
+	// Legacy opt-in flags (kept for backwards compatibility, now default to true)
+	scanCmd.Flags().BoolVar(&cfg.EnableScreenshots, "screenshots", true, "Enable screenshot capture (default: true)")
+	scanCmd.Flags().BoolVar(&cfg.EnableGraphQL, "graphql", true, "Enable GraphQL endpoint detection (default: true)")
+	scanCmd.Flags().BoolVar(&cfg.EnableOSINT, "osint", true, "Enable OSINT (default: true)")
+	scanCmd.Flags().BoolVar(&cfg.GenerateReport, "report", true, "Generate HTML report (default: true)")
+
+	// Mark legacy flags as hidden (they still work but --no-* is preferred)
+	scanCmd.Flags().MarkHidden("screenshots")
+	scanCmd.Flags().MarkHidden("graphql")
+	scanCmd.Flags().MarkHidden("osint")
+	scanCmd.Flags().MarkHidden("report")
 }
 
 func runScan(cmd *cobra.Command, args []string) error {
@@ -48,6 +107,53 @@ func runScan(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("target domain required: reconator scan <domain> or reconator scan -l <file>")
 	}
 
-	r := runner.New(&cfg)
-	return r.Run()
+	// Apply opt-out flags (these override defaults)
+	if noScreenshots {
+		cfg.EnableScreenshots = false
+	}
+	if noGraphQL {
+		cfg.EnableGraphQL = false
+	}
+	if noOSINT {
+		cfg.EnableOSINT = false
+	}
+	if noAI {
+		cfg.SkipAIGuided = true
+	}
+	if noReport {
+		cfg.GenerateReport = false
+	}
+	if noSQLite {
+		cfg.EnableSQLite = false
+	}
+	if noResume {
+		cfg.AutoResume = false
+	}
+
+	// Quick mode skips slow phases
+	if cfg.QuickMode {
+		cfg.SkipDirBrute = true
+		cfg.SkipVulnScan = true
+	}
+
+	// Load Ollama config from environment if not set via flags
+	if cfg.OllamaURL == "" || cfg.OllamaModel == "" {
+		envURL, envModel := aiguided.GetOllamaConfigFromEnv()
+		if cfg.OllamaURL == "" {
+			cfg.OllamaURL = envURL
+		}
+		if cfg.OllamaModel == "" {
+			cfg.OllamaModel = envModel
+		}
+	}
+
+	// Use legacy runner if requested, otherwise use pipeline (default)
+	if useLegacy {
+		r := runner.New(&cfg)
+		return r.Run()
+	}
+
+	// Pipeline runner is the default (parallel phases, resumable)
+	pr := runner.NewPipelineRunner(&cfg)
+	return pr.Run()
 }

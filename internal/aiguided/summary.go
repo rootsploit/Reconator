@@ -382,3 +382,359 @@ func (s *AssetSummary) SaveAssetSummary(dir string) error {
 
 	return nil
 }
+
+// ExecutiveSummary represents an AI-generated executive summary
+type ExecutiveSummary struct {
+	OneLiner           string   `json:"one_liner"`
+	KeyFindings        []string `json:"key_findings"`
+	ImmediateActions   []string `json:"immediate_actions"`
+	RiskAssessment     string   `json:"risk_assessment"`
+	BusinessImpact     string   `json:"business_impact"`
+	RecommendedNextSteps []string `json:"recommended_next_steps"`
+	Provider           string   `json:"provider"`
+}
+
+// SummaryGenerator generates AI-powered executive summaries
+type SummaryGenerator struct {
+	provider *ProviderManager
+}
+
+// NewSummaryGenerator creates a new AI summary generator
+func NewSummaryGenerator() *SummaryGenerator {
+	pm := NewProviderManager()
+	pm.LoadFromEnv()
+	configPath := GetDefaultConfigPath()
+	pm.LoadFromFile(configPath)
+
+	return &SummaryGenerator{provider: pm}
+}
+
+// GenerateExecutiveSummary creates an AI-powered executive summary
+func (sg *SummaryGenerator) GenerateExecutiveSummary(summary *AssetSummary, vulns []Vulnerability, chainAnalysis *ChainAnalysis) (*ExecutiveSummary, error) {
+	providers := sg.provider.GetAvailableProviders()
+	if len(providers) == 0 {
+		// Return rule-based summary if no AI available
+		return sg.generateRuleBasedSummary(summary, vulns), nil
+	}
+
+	prompt := sg.buildSummaryPrompt(summary, vulns, chainAnalysis)
+
+	response, provider, err := sg.provider.QueryRaw(prompt)
+	if err != nil {
+		fmt.Printf("        [AI Summary] AI generation failed: %v, using rule-based\n", err)
+		return sg.generateRuleBasedSummary(summary, vulns), nil
+	}
+
+	execSummary, err := sg.parseSummaryResponse(response)
+	if err != nil {
+		fmt.Printf("        [AI Summary] Parse failed: %v, using rule-based\n", err)
+		return sg.generateRuleBasedSummary(summary, vulns), nil
+	}
+
+	execSummary.Provider = string(provider)
+	return execSummary, nil
+}
+
+func (sg *SummaryGenerator) buildSummaryPrompt(summary *AssetSummary, vulns []Vulnerability, chainAnalysis *ChainAnalysis) string {
+	// Build vulnerability summary by severity
+	var criticalVulns, highVulns []string
+	for _, v := range vulns {
+		entry := fmt.Sprintf("%s: %s (%s)", v.TemplateID, v.Name, v.Host)
+		switch strings.ToLower(v.Severity) {
+		case "critical":
+			if len(criticalVulns) < 5 {
+				criticalVulns = append(criticalVulns, entry)
+			}
+		case "high":
+			if len(highVulns) < 5 {
+				highVulns = append(highVulns, entry)
+			}
+		}
+	}
+
+	// Build chain summary
+	chainSummary := "No attack chains identified"
+	if chainAnalysis != nil && len(chainAnalysis.Chains) > 0 {
+		var chains []string
+		for _, c := range chainAnalysis.Chains {
+			if len(chains) < 3 {
+				chains = append(chains, fmt.Sprintf("%s (%s)", c.Name, c.Severity))
+			}
+		}
+		chainSummary = strings.Join(chains, "; ")
+	}
+
+	// Build manual checks summary
+	var highConfChecks []string
+	for _, check := range summary.ManualChecks {
+		if check.Confidence == "high" && len(highConfChecks) < 3 {
+			highConfChecks = append(highConfChecks, check.Category)
+		}
+	}
+
+	return fmt.Sprintf(`<agent_core>
+  <role>You are a Senior Security Consultant writing an Executive Briefing for a CISO.</role>
+  <methodology>Pyramid Principle: Lead with the conclusion, then support with key findings.</methodology>
+  <constraint>Be concise, actionable, and business-focused. No technical jargon in the one-liner.</constraint>
+</agent_core>
+
+<co_star_context>
+  <context>Security reconnaissance completed on %s</context>
+  <objective>Provide actionable executive summary for security leadership</objective>
+  <style>Professional, concise, risk-focused</style>
+  <tone>Authoritative but not alarmist</tone>
+  <audience>CISO, Security Director, Engineering Leadership</audience>
+  <response>Structured JSON with clear action items</response>
+</co_star_context>
+
+<scan_results>
+  <target>%s</target>
+  <risk_score>%d/100</risk_score>
+  <attack_surface>
+    <endpoints>%d</endpoints>
+    <parameters>%d</parameters>
+    <js_files>%d</js_files>
+    <api_endpoints>%d</api_endpoints>
+    <technologies>%s</technologies>
+    <waf_protected>%d hosts</waf_protected>
+    <direct_access>%d hosts (no WAF)</direct_access>
+  </attack_surface>
+  <vulnerabilities>
+    <total>%d</total>
+    <critical>%s</critical>
+    <high>%s</high>
+  </vulnerabilities>
+  <attack_chains>%s</attack_chains>
+  <high_confidence_issues>%s</high_confidence_issues>
+</scan_results>
+
+<output_requirements>
+  <pyramid_structure>
+    1. ONE-LINER: Single sentence conclusion (what's the security posture?)
+    2. KEY FINDINGS: 3-5 bullet points of most important discoveries
+    3. IMMEDIATE ACTIONS: 2-3 things to do THIS WEEK
+    4. RISK ASSESSMENT: Overall risk level with brief justification
+    5. BUSINESS IMPACT: Potential consequences if not addressed
+    6. NEXT STEPS: Recommended follow-up activities
+  </pyramid_structure>
+</output_requirements>
+
+<output_format>
+First, in <thinking> tags, analyze the data and determine the most critical issues.
+Then output JSON:
+{
+  "one_liner": "Single sentence executive summary",
+  "key_findings": [
+    "Finding 1 - most critical",
+    "Finding 2",
+    "Finding 3"
+  ],
+  "immediate_actions": [
+    "Action 1 - highest priority",
+    "Action 2"
+  ],
+  "risk_assessment": "HIGH/MEDIUM/LOW - Brief justification",
+  "business_impact": "What could happen if these issues are not addressed",
+  "recommended_next_steps": [
+    "Next step 1",
+    "Next step 2"
+  ]
+}
+</output_format>`,
+		summary.Domain,
+		summary.Domain,
+		summary.RiskScore,
+		summary.AttackSurface.TotalEndpoints,
+		summary.AttackSurface.TotalParameters,
+		summary.AttackSurface.TotalJSFiles,
+		summary.AttackSurface.TotalAPIs,
+		strings.Join(summary.AttackSurface.Technologies, ", "),
+		summary.AttackSurface.CDNProtected,
+		summary.AttackSurface.DirectHosts,
+		len(vulns),
+		strings.Join(criticalVulns, "; "),
+		strings.Join(highVulns, "; "),
+		chainSummary,
+		strings.Join(highConfChecks, ", "),
+	)
+}
+
+func (sg *SummaryGenerator) parseSummaryResponse(response string) (*ExecutiveSummary, error) {
+	// Remove <thinking> tags
+	if idx := strings.Index(response, "</thinking>"); idx != -1 {
+		response = response[idx+len("</thinking>"):]
+	}
+	if idx := strings.Index(response, "<thinking>"); idx != -1 {
+		if endIdx := strings.Index(response, "</thinking>"); endIdx != -1 {
+			response = response[:idx] + response[endIdx+len("</thinking>"):]
+		}
+	}
+
+	response = strings.TrimSpace(response)
+
+	// Strip markdown code blocks
+	if strings.HasPrefix(response, "```json") {
+		response = strings.TrimPrefix(response, "```json")
+	}
+	if strings.HasPrefix(response, "```") {
+		response = strings.TrimPrefix(response, "```")
+	}
+	response = strings.TrimSuffix(response, "```")
+	response = strings.TrimSpace(response)
+
+	// Find JSON
+	jsonStart := strings.Index(response, "{")
+	jsonEnd := strings.LastIndex(response, "}")
+	if jsonStart == -1 || jsonEnd == -1 || jsonEnd <= jsonStart {
+		return nil, fmt.Errorf("no JSON found in response")
+	}
+
+	jsonStr := response[jsonStart : jsonEnd+1]
+	var summary ExecutiveSummary
+	if err := json.Unmarshal([]byte(jsonStr), &summary); err != nil {
+		return nil, fmt.Errorf("JSON parse error: %w", err)
+	}
+
+	return &summary, nil
+}
+
+func (sg *SummaryGenerator) generateRuleBasedSummary(summary *AssetSummary, vulns []Vulnerability) *ExecutiveSummary {
+	// Count vulnerabilities by severity
+	critCount, highCount, medCount := 0, 0, 0
+	for _, v := range vulns {
+		switch strings.ToLower(v.Severity) {
+		case "critical":
+			critCount++
+		case "high":
+			highCount++
+		case "medium":
+			medCount++
+		}
+	}
+
+	// Determine risk level
+	riskLevel := "LOW"
+	if summary.RiskScore >= 70 || critCount > 0 {
+		riskLevel = "HIGH"
+	} else if summary.RiskScore >= 40 || highCount > 2 {
+		riskLevel = "MEDIUM"
+	}
+
+	// Build one-liner
+	oneLiner := fmt.Sprintf("%s has a %s security risk posture with %d vulnerabilities identified across %d endpoints.",
+		summary.Domain, riskLevel, len(vulns), summary.AttackSurface.TotalEndpoints)
+
+	// Build key findings
+	var findings []string
+	if critCount > 0 {
+		findings = append(findings, fmt.Sprintf("%d critical vulnerabilities require immediate attention", critCount))
+	}
+	if highCount > 0 {
+		findings = append(findings, fmt.Sprintf("%d high severity issues detected", highCount))
+	}
+	if summary.AttackSurface.DirectHosts > 0 {
+		findings = append(findings, fmt.Sprintf("%d hosts directly accessible without WAF protection", summary.AttackSurface.DirectHosts))
+	}
+	if len(summary.AttackSurface.Technologies) > 0 {
+		findings = append(findings, fmt.Sprintf("Technology stack includes: %s", strings.Join(truncateList(summary.AttackSurface.Technologies, 5), ", ")))
+	}
+	for _, check := range summary.ManualChecks {
+		if check.Confidence == "high" && len(findings) < 5 {
+			findings = append(findings, fmt.Sprintf("High confidence %s indicators detected", check.Category))
+		}
+	}
+
+	// Build immediate actions
+	var actions []string
+	if critCount > 0 {
+		actions = append(actions, "Remediate critical vulnerabilities within 24-48 hours")
+	}
+	if summary.AttackSurface.DirectHosts > 0 {
+		actions = append(actions, "Enable WAF/CDN protection for exposed hosts")
+	}
+	for _, check := range summary.ManualChecks {
+		if check.Confidence == "high" && len(actions) < 3 {
+			actions = append(actions, fmt.Sprintf("Investigate %s findings with manual testing", check.Category))
+		}
+	}
+	if len(actions) == 0 {
+		actions = append(actions, "Review medium-severity findings and prioritize remediation")
+	}
+
+	// Build business impact
+	businessImpact := "Minimal business risk if current posture is maintained."
+	if riskLevel == "HIGH" {
+		businessImpact = "Critical vulnerabilities could lead to data breach, service disruption, or unauthorized access. Immediate remediation required."
+	} else if riskLevel == "MEDIUM" {
+		businessImpact = "Identified issues present moderate risk of exploitation. Remediation should be prioritized within the next sprint cycle."
+	}
+
+	// Build next steps
+	nextSteps := []string{
+		"Schedule vulnerability remediation sprint",
+		"Conduct manual penetration testing on high-confidence findings",
+		"Review and update security monitoring for identified attack vectors",
+	}
+
+	return &ExecutiveSummary{
+		OneLiner:           oneLiner,
+		KeyFindings:        findings,
+		ImmediateActions:   actions,
+		RiskAssessment:     fmt.Sprintf("%s - Risk score %d/100 based on attack surface and vulnerability analysis", riskLevel, summary.RiskScore),
+		BusinessImpact:     businessImpact,
+		RecommendedNextSteps: nextSteps,
+		Provider:           "rule-based",
+	}
+}
+
+// SaveExecutiveSummary saves the executive summary to a file
+func (es *ExecutiveSummary) SaveExecutiveSummary(dir string) error {
+	os.MkdirAll(dir, 0755)
+
+	// Save JSON
+	data, _ := json.MarshalIndent(es, "", "  ")
+	os.WriteFile(filepath.Join(dir, "executive_summary.json"), data, 0644)
+
+	// Save human-readable report
+	f, _ := os.Create(filepath.Join(dir, "executive_summary.txt"))
+	defer f.Close()
+
+	fmt.Fprintf(f, "EXECUTIVE SECURITY SUMMARY\n")
+	fmt.Fprintf(f, strings.Repeat("=", 60)+"\n\n")
+
+	fmt.Fprintf(f, "BOTTOM LINE\n")
+	fmt.Fprintf(f, "-----------\n")
+	fmt.Fprintf(f, "%s\n\n", es.OneLiner)
+
+	fmt.Fprintf(f, "KEY FINDINGS\n")
+	fmt.Fprintf(f, "------------\n")
+	for i, finding := range es.KeyFindings {
+		fmt.Fprintf(f, "%d. %s\n", i+1, finding)
+	}
+	fmt.Fprintf(f, "\n")
+
+	fmt.Fprintf(f, "IMMEDIATE ACTIONS REQUIRED\n")
+	fmt.Fprintf(f, "--------------------------\n")
+	for i, action := range es.ImmediateActions {
+		fmt.Fprintf(f, "%d. %s\n", i+1, action)
+	}
+	fmt.Fprintf(f, "\n")
+
+	fmt.Fprintf(f, "RISK ASSESSMENT\n")
+	fmt.Fprintf(f, "---------------\n")
+	fmt.Fprintf(f, "%s\n\n", es.RiskAssessment)
+
+	fmt.Fprintf(f, "BUSINESS IMPACT\n")
+	fmt.Fprintf(f, "---------------\n")
+	fmt.Fprintf(f, "%s\n\n", es.BusinessImpact)
+
+	fmt.Fprintf(f, "RECOMMENDED NEXT STEPS\n")
+	fmt.Fprintf(f, "----------------------\n")
+	for i, step := range es.RecommendedNextSteps {
+		fmt.Fprintf(f, "%d. %s\n", i+1, step)
+	}
+
+	fmt.Fprintf(f, "\n[Generated by AI: %s]\n", es.Provider)
+
+	return nil
+}

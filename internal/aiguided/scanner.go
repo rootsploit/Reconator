@@ -23,6 +23,7 @@ type Result struct {
 	RecommendedTemplates []string        `json:"recommended_templates"`
 	AIProvider           string          `json:"ai_provider"`
 	Vulnerabilities      []Vulnerability `json:"vulnerabilities"`
+	ChainAnalysis        *ChainAnalysis  `json:"chain_analysis,omitempty"`
 	Duration             time.Duration   `json:"duration"`
 }
 
@@ -58,12 +59,45 @@ type TargetContext struct {
 }
 
 type Scanner struct {
-	cfg *config.Config
-	c   *tools.Checker
+	cfg      *config.Config
+	c        *tools.Checker
+	provider *ProviderManager
 }
 
 func NewScanner(cfg *config.Config, checker *tools.Checker) *Scanner {
-	return &Scanner{cfg: cfg, c: checker}
+	// Initialize provider manager with environment keys
+	pm := NewProviderManager()
+	pm.LoadFromEnv()
+
+	// Also load from config file if specified
+	configPath := GetDefaultConfigPath()
+	if _, err := os.Stat(configPath); err == nil {
+		pm.LoadFromFile(configPath)
+	}
+
+	// Add keys from config if not already loaded from env
+	if cfg.OpenAIKey != "" {
+		pm.addProvider(ProviderOpenAI, []string{cfg.OpenAIKey}, "", "gpt-4o-mini", 60)
+	}
+	if cfg.ClaudeKey != "" {
+		pm.addProvider(ProviderClaude, []string{cfg.ClaudeKey}, "", "claude-sonnet-4-20250514", 50)
+	}
+	if cfg.GeminiKey != "" {
+		pm.addProvider(ProviderGemini, []string{cfg.GeminiKey}, "", "gemini-1.5-flash", 60)
+	}
+	if cfg.OllamaURL != "" || cfg.OllamaModel != "" {
+		url := cfg.OllamaURL
+		if url == "" {
+			url = "http://localhost:11434"
+		}
+		model := cfg.OllamaModel
+		if model == "" {
+			model = "llama3.2"
+		}
+		pm.addProvider(ProviderOllama, []string{""}, url, model, 0)
+	}
+
+	return &Scanner{cfg: cfg, c: checker, provider: pm}
 }
 
 // Scan performs smart scanning using CVEMap (primary) + AI recommendations (secondary)
@@ -114,23 +148,25 @@ func (s *Scanner) Scan(hosts []string, ctx *TargetContext) (*Result, error) {
 	}
 
 	// Phase 2: AI recommendations for misconfigs (SECONDARY)
-	hasAIKeys := s.cfg.OpenAIKey != "" || s.cfg.ClaudeKey != "" || s.cfg.GeminiKey != ""
-	if hasAIKeys {
+	// Use ProviderManager for key rotation and failover
+	hasAIProviders := len(s.provider.GetAvailableProviders()) > 0
+	if hasAIProviders {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			fmt.Println("        [AI] Getting misconfiguration recommendations...")
-			rec, provider, err := s.getAIRecommendations(ctx)
+			fmt.Printf("        [AI] Available providers: %v\n", s.provider.GetAvailableProviders())
+			rec, provider, err := s.getAIRecommendationsWithRotation(ctx)
 			if err != nil {
 				fmt.Printf("        [AI] Failed: %v, using defaults\n", err)
 				rec = s.getDefaultRecommendations(ctx)
-				provider = "fallback"
+				provider = ProviderType("fallback")
 			}
 			mu.Lock()
 			result.TargetSummary = rec.Summary
 			result.RecommendedTags = rec.Tags
 			result.RecommendedTemplates = append(result.RecommendedTemplates, rec.Templates...)
-			result.AIProvider = provider
+			result.AIProvider = string(provider)
 			mu.Unlock()
 			fmt.Printf("        [AI] Provider: %s, Tags: %v\n", provider, rec.Tags)
 		}()
@@ -152,6 +188,24 @@ func (s *Scanner) Scan(hosts []string, ctx *TargetContext) (*Result, error) {
 		vulns := s.runNuclei(hosts, cveIDs, result.RecommendedTags)
 		result.Vulnerabilities = vulns
 		fmt.Printf("        [Nuclei] Found %d vulnerabilities\n", len(vulns))
+	}
+
+	// Phase 4: AI Vulnerability Chaining Analysis
+	if len(result.Vulnerabilities) >= 2 && hasAIProviders {
+		fmt.Println("        [AI Chain] Analyzing vulnerability chains...")
+		chainer := NewVulnChainer()
+		chainAnalysis, err := chainer.AnalyzeChains(result.Vulnerabilities, ctx)
+		if err == nil && chainAnalysis != nil {
+			result.ChainAnalysis = chainAnalysis
+			fmt.Printf("        [AI Chain] Found %d potential attack chains\n", len(chainAnalysis.Chains))
+			if len(chainAnalysis.Chains) > 0 {
+				for _, chain := range chainAnalysis.Chains {
+					fmt.Printf("          - %s [%s]: %s\n", chain.Name, chain.Severity, chain.Description)
+				}
+			}
+		} else if err != nil {
+			fmt.Printf("        [AI Chain] Analysis failed: %v\n", err)
+		}
 	}
 
 	result.Duration = time.Since(start)
@@ -294,53 +348,171 @@ type AIRecommendation struct {
 	Reasoning string   `json:"reasoning"`
 }
 
-func (s *Scanner) getAIRecommendations(ctx *TargetContext) (*AIRecommendation, string, error) {
+// getAIRecommendationsWithRotation uses ProviderManager for key rotation and failover
+func (s *Scanner) getAIRecommendationsWithRotation(ctx *TargetContext) (*AIRecommendation, ProviderType, error) {
 	prompt := s.buildPrompt(ctx)
+	return s.provider.Query(prompt)
+}
 
-	if key := s.cfg.OpenAIKey; key != "" {
-		rec, err := s.queryOpenAI(prompt, key)
-		if err == nil {
-			return rec, "openai", nil
-		}
-	}
-
-	if key := s.cfg.ClaudeKey; key != "" {
-		rec, err := s.queryClaude(prompt, key)
-		if err == nil {
-			return rec, "claude", nil
-		}
-	}
-
-	if key := s.cfg.GeminiKey; key != "" {
-		rec, err := s.queryGemini(prompt, key)
-		if err == nil {
-			return rec, "gemini", nil
-		}
-	}
-
-	return nil, "", fmt.Errorf("no AI provider available")
+// getAIRecommendations is the legacy method (kept for backwards compatibility)
+func (s *Scanner) getAIRecommendations(ctx *TargetContext) (*AIRecommendation, string, error) {
+	rec, provider, err := s.getAIRecommendationsWithRotation(ctx)
+	return rec, string(provider), err
 }
 
 func (s *Scanner) buildPrompt(ctx *TargetContext) string {
-	return fmt.Sprintf(`You are a security expert. Recommend nuclei TAGS for misconfiguration scanning.
-Note: CVE scanning is handled separately via cvemap. Focus ONLY on misconfigurations.
+	// Build technologies list safely
+	techList := "None detected"
+	if len(ctx.Technologies) > 0 {
+		techList = strings.Join(ctx.Technologies, ", ")
+	}
 
-Target:
-- Domain: %s
-- Technologies: %v
-- Endpoints: %d, JS files: %d, API endpoints: %d
-- WAF: %v
+	// Build services list
+	servicesList := "None detected"
+	if len(ctx.Services) > 0 {
+		servicesList = strings.Join(ctx.Services, ", ")
+	}
 
-Recommend tags for: misconfigurations, default credentials, information disclosure, security headers.
+	// Truncate endpoints for prompt (max 10)
+	endpointSample := ""
+	if len(ctx.Endpoints) > 0 {
+		limit := 10
+		if len(ctx.Endpoints) < limit {
+			limit = len(ctx.Endpoints)
+		}
+		endpointSample = strings.Join(ctx.Endpoints[:limit], "\n    ")
+	}
 
-Respond with JSON only:
-{"summary": "brief analysis", "tags": ["misconfig", "exposure", "default-login"], "templates": [], "reasoning": "brief"}`,
+	// Truncate JS files for prompt (max 5)
+	jsSample := ""
+	if len(ctx.JSFiles) > 0 {
+		limit := 5
+		if len(ctx.JSFiles) < limit {
+			limit = len(ctx.JSFiles)
+		}
+		jsSample = strings.Join(ctx.JSFiles[:limit], "\n    ")
+	}
+
+	// Truncate API endpoints for prompt (max 5)
+	apiSample := ""
+	if len(ctx.APIEndpoints) > 0 {
+		limit := 5
+		if len(ctx.APIEndpoints) < limit {
+			limit = len(ctx.APIEndpoints)
+		}
+		apiSample = strings.Join(ctx.APIEndpoints[:limit], "\n    ")
+	}
+
+	wafStatus := "Not Detected"
+	if ctx.WAFDetected {
+		wafStatus = "DETECTED - Use evasion-friendly techniques"
+	}
+
+	return fmt.Sprintf(`<agent_core>
+  <context>You are the Logic Engine for a specialized vulnerability scanner. Your ONLY task is to map detected technologies to precise Nuclei templates/tags.</context>
+  <objective>Analyze the target's technology fingerprint and recommend the highest-impact Nuclei tags for vulnerability discovery.</objective>
+</agent_core>
+
+<target_fingerprint>
+  <domain>%s</domain>
+  <technologies>%s</technologies>
+  <services>%s</services>
+  <waf_status>%s</waf_status>
+  <attack_surface>
+    <total_endpoints>%d</total_endpoints>
+    <total_js_files>%d</total_js_files>
+    <total_api_endpoints>%d</total_api_endpoints>
+    <cdn_protected_hosts>%d</cdn_protected_hosts>
+  </attack_surface>
+  <sample_endpoints>
+    %s
+  </sample_endpoints>
+  <sample_js_files>
+    %s
+  </sample_js_files>
+  <sample_api_endpoints>
+    %s
+  </sample_api_endpoints>
+</target_fingerprint>
+
+<tech_to_tag_mapping>
+  <!-- Web Servers -->
+  nginx -> nginx, nginx-detect
+  apache -> apache, apache-detect
+  iis -> iis, microsoft
+  tomcat -> tomcat, apache-tomcat
+
+  <!-- CMS -->
+  wordpress -> wordpress, wp-plugin, wp-theme
+  drupal -> drupal
+  joomla -> joomla
+
+  <!-- Frameworks -->
+  spring, springboot -> springboot, actuator, spring
+  django -> django, python
+  laravel -> laravel, php
+  express, nodejs -> nodejs, express
+  rails -> rails, ruby
+
+  <!-- DevOps/CI -->
+  jenkins -> jenkins, ci
+  gitlab -> gitlab, git
+  kubernetes -> kubernetes, k8s, helm
+  docker -> docker, container
+
+  <!-- Databases -->
+  mysql -> mysql, database
+  postgresql -> postgresql, database
+  mongodb -> mongodb, nosql
+  redis -> redis, cache
+  elasticsearch -> elasticsearch, elastic
+
+  <!-- Monitoring -->
+  grafana -> grafana, monitoring
+  prometheus -> prometheus
+  kibana -> kibana
+
+  <!-- Cloud -->
+  aws -> aws, amazon, s3
+  azure -> azure, microsoft
+  gcp -> gcp, google-cloud
+</tech_to_tag_mapping>
+
+<constraints>
+  <hard_rules>
+    - ONLY recommend tags that exist in Nuclei's public template library
+    - Maximum 12 tags total to avoid scan timeout
+    - If WAF detected, prioritize: misconfig, exposure, token-spray (passive/semi-passive)
+    - If no WAF, include: cve, sqli, xss, rce for active testing
+  </hard_rules>
+  <priority_order>
+    1. Technology-specific tags (highest signal)
+    2. Service-specific tags (ports/protocols)
+    3. Generic high-value: misconfig, exposure, default-login, cve
+    4. API-specific if endpoints detected: api, swagger, graphql
+  </priority_order>
+</constraints>
+
+<output_format>
+First, write your analysis in <thinking> tags. Then output ONLY valid JSON:
+{
+  "summary": "Brief description of target and focus areas",
+  "tags": ["tag1", "tag2", ...],
+  "templates": [],
+  "reasoning": "Why these specific tags were chosen based on detected tech"
+}
+</output_format>`,
 		ctx.Domain,
-		ctx.Technologies,
+		techList,
+		servicesList,
+		wafStatus,
 		len(ctx.Endpoints),
 		len(ctx.JSFiles),
 		len(ctx.APIEndpoints),
-		ctx.WAFDetected,
+		ctx.CDNHosts,
+		endpointSample,
+		jsSample,
+		apiSample,
 	)
 }
 
@@ -470,7 +642,72 @@ func (s *Scanner) queryGemini(prompt, apiKey string) (*AIRecommendation, error) 
 	return parseAIResponse(result.Candidates[0].Content.Parts[0].Text)
 }
 
+func (s *Scanner) queryOllama(prompt string) (*AIRecommendation, error) {
+	// Default Ollama URL if not specified
+	ollamaURL := s.cfg.OllamaURL
+	if ollamaURL == "" {
+		ollamaURL = "http://localhost:11434"
+	}
+
+	// Default model if not specified
+	model := s.cfg.OllamaModel
+	if model == "" {
+		model = "llama3.2" // Default to llama3.2
+	}
+
+	// Ollama API uses /api/generate endpoint
+	reqBody := map[string]interface{}{
+		"model":  model,
+		"prompt": "You are a security expert. Respond only with valid JSON.\n\n" + prompt,
+		"stream": false,
+		"options": map[string]interface{}{
+			"temperature": 0.3,
+			"num_predict": 500,
+		},
+	}
+
+	body, _ := json.Marshal(reqBody)
+	req, _ := http.NewRequest("POST", ollamaURL+"/api/generate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 120 * time.Second} // Longer timeout for local inference
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Ollama connection failed: %v (is Ollama running?)", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Ollama error: %d - %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Response string `json:"response"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if result.Response == "" {
+		return nil, fmt.Errorf("no response from Ollama")
+	}
+
+	return parseAIResponse(result.Response)
+}
+
 func parseAIResponse(content string) (*AIRecommendation, error) {
+	content = strings.TrimSpace(content)
+
+	// Remove <thinking> tags (System 2 Prompting output)
+	if idx := strings.Index(content, "</thinking>"); idx != -1 {
+		content = content[idx+len("</thinking>"):]
+	}
+	// Also handle case where thinking tag is at the start
+	if idx := strings.Index(content, "<thinking>"); idx != -1 {
+		if endIdx := strings.Index(content, "</thinking>"); endIdx != -1 {
+			content = content[:idx] + content[endIdx+len("</thinking>"):]
+		}
+	}
+
 	content = strings.TrimSpace(content)
 	if strings.HasPrefix(content, "```json") {
 		content = strings.TrimPrefix(content, "```json")
@@ -480,6 +717,13 @@ func parseAIResponse(content string) (*AIRecommendation, error) {
 	}
 	content = strings.TrimSuffix(content, "```")
 	content = strings.TrimSpace(content)
+
+	// Find the JSON object in the response
+	startIdx := strings.Index(content, "{")
+	endIdx := strings.LastIndex(content, "}")
+	if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+		content = content[startIdx : endIdx+1]
+	}
 
 	var rec AIRecommendation
 	if err := json.Unmarshal([]byte(content), &rec); err != nil {
@@ -530,13 +774,19 @@ func (s *Scanner) runNuclei(hosts []string, cveIDs []string, tags []string) []Vu
 
 	args := []string{
 		"-l", tmp,
-		"-severity", "medium,high,critical",
-		"-silent", "-json",
+		"-severity", "high,critical", // Skip medium for speed
+		"-silent", "-jsonl",
+		"-exclude-tags", "dos,fuzz",
+		"-ss", "host-spray",
+		"-mhe", "3",
+		"-timeout", "5",
+		"-duc",
 	}
 
 	// Add CVE IDs from cvemap (high priority - real CVEs)
+	// Limit to 20 to avoid long scans
 	if len(cveIDs) > 0 {
-		limit := 40
+		limit := 20
 		if len(cveIDs) < limit {
 			limit = len(cveIDs)
 		}
@@ -550,15 +800,23 @@ func (s *Scanner) runNuclei(hosts []string, cveIDs []string, tags []string) []Vu
 		args = append(args, "-tags", strings.Join(tags, ","))
 	}
 
+	// Performance tuning
 	if s.cfg.Threads > 0 {
 		args = append(args, "-c", fmt.Sprintf("%d", s.cfg.Threads))
+		args = append(args, "-bs", fmt.Sprintf("%d", s.cfg.Threads*2))
+		args = append(args, "-pc", fmt.Sprintf("%d", s.cfg.Threads))
+	} else {
+		args = append(args, "-c", "50", "-bs", "100", "-pc", "50")
 	}
 
 	if s.cfg.RateLimit > 0 {
 		args = append(args, "-rl", fmt.Sprintf("%d", s.cfg.RateLimit))
+	} else {
+		args = append(args, "-rl", "500")
 	}
 
-	r := exec.Run("nuclei", args, &exec.Options{Timeout: 45 * time.Minute})
+	// 10 minute timeout for AI-guided scan (should be quick with targeted templates)
+	r := exec.Run("nuclei", args, &exec.Options{Timeout: 10 * time.Minute})
 	if r.Error != nil {
 		return vulns
 	}
@@ -616,5 +874,15 @@ func GetAPIKeysFromEnv() (openai, claude, gemini string) {
 	if gemini == "" {
 		gemini = os.Getenv("GOOGLE_AI_KEY")
 	}
+	return
+}
+
+// GetOllamaConfigFromEnv returns Ollama configuration from environment variables
+func GetOllamaConfigFromEnv() (url, model string) {
+	url = os.Getenv("OLLAMA_HOST")
+	if url == "" {
+		url = os.Getenv("OLLAMA_URL")
+	}
+	model = os.Getenv("OLLAMA_MODEL")
 	return
 }

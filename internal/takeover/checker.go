@@ -129,7 +129,7 @@ func (c *Checker) nuclei(input string) []Vulnerable {
 	args := []string{
 		"-l", input,
 		"-severity", "critical,high,medium",
-		"-silent", "-json",
+		"-silent", "-jsonl",
 	}
 
 	// Check if templates directory exists at ~/nuclei-templates

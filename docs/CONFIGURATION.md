@@ -188,34 +188,92 @@ subfinder -d example.com -silent | wc -l
 
 ## AI Provider Configuration
 
-AI providers are used for smart nuclei template selection in Phase 9 (AI-Guided Scanning).
+AI providers are used for smart nuclei template selection and vulnerability chain analysis in Phase 9 (AI-Guided Scanning).
 
-### Supported Providers
+### Supported Providers (Priority Order)
 
-| Provider | Environment Variable | Get Key |
-|----------|---------------------|---------|
-| OpenAI | `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
-| Claude | `ANTHROPIC_API_KEY` | https://console.anthropic.com |
-| Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
+| # | Provider | Environment Variable | Get Key | Notes |
+|:-:|----------|---------------------|---------|-------|
+| 1 | Ollama | - | https://ollama.com | Local, free, private |
+| 2 | Groq | `GROQ_API_KEY` | https://console.groq.com/keys | Fast, free tier |
+| 3 | DeepSeek | `DEEPSEEK_API_KEY` | https://platform.deepseek.com/api_keys | Cheap, good |
+| 4 | Claude | `ANTHROPIC_API_KEY` | https://console.anthropic.com | Best quality |
+| 5 | OpenAI | `OPENAI_API_KEY` | https://platform.openai.com/api-keys | Reliable |
+| 6 | Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey | Google AI |
 
-### Setup
+### Setup Option 1: Config File (Recommended)
+
+Create `~/.reconator/ai-config.yaml`:
+
+```yaml
+providers:
+  # Ollama - Local AI (FREE, PRIVATE, NO API KEY)
+  - name: ollama
+    endpoint: "http://localhost:11434"
+    model: "qwen2.5:32b"
+    keys: []
+
+  # Groq - Fast inference, generous free tier
+  - name: groq
+    keys:
+      - "gsk_YOUR_GROQ_KEY"
+    model: "llama-3.1-70b-versatile"
+    rpm_limit: 30
+
+  # DeepSeek - Cheap and good quality
+  - name: deepseek
+    keys:
+      - "sk-YOUR_DEEPSEEK_KEY"
+    model: "deepseek-chat"
+    rpm_limit: 60
+
+  # Claude - Best quality for security analysis
+  - name: claude
+    keys:
+      - "sk-ant-YOUR_CLAUDE_KEY"
+    model: "claude-sonnet-4-20250514"
+    rpm_limit: 50
+
+  # OpenAI - Reliable fallback
+  - name: openai
+    keys:
+      - "sk-YOUR_OPENAI_KEY"
+    model: "gpt-4o-mini"
+    rpm_limit: 60
+
+  # Gemini - Google AI
+  - name: gemini
+    keys:
+      - "YOUR_GEMINI_KEY"
+    model: "gemini-1.5-flash"
+    rpm_limit: 60
+```
+
+### Setup Option 2: Environment Variables
 
 ```bash
 # Add to ~/.bashrc or ~/.zshrc
-export OPENAI_API_KEY="sk-..."
+export GROQ_API_KEY="gsk_..."
+export DEEPSEEK_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
 export GEMINI_API_KEY="..."
 
 # Reload shell
 source ~/.bashrc
 ```
 
-### Priority Order
+### Priority Order & Key Rotation
 
 Reconator tries providers in this order:
-1. OpenAI (gpt-4o-mini)
-2. Claude (claude-sonnet-4-20250514)
-3. Gemini (gemini-1.5-flash)
+1. Ollama (local) - if running at localhost:11434
+2. Groq (llama-3.1-70b-versatile)
+3. DeepSeek (deepseek-chat)
+4. Claude (claude-sonnet-4-20250514)
+5. OpenAI (gpt-4o-mini)
+6. Gemini (gemini-1.5-flash)
+
+**Key Rotation**: On rate limit (429), Reconator automatically tries the next key or provider.
 
 If all fail, it falls back to technology-based default recommendations.
 

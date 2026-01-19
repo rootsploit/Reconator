@@ -290,7 +290,7 @@ func (s *GraphQLScanner) runNucleiGraphQL(ctx context.Context, result *GraphQLRe
 		"-l", tmp,
 		"-tags", "graphql",
 		"-severity", "low,medium,high,critical",
-		"-silent", "-json",
+		"-silent", "-jsonl",
 	}
 
 	if s.cfg.Threads > 0 {

@@ -101,6 +101,16 @@ func GetWordlists() []Wordlist {
 			Description: "SecLists directory bruteforce wordlist",
 			Required:    true,
 		},
+		{
+			Name:     "VHost Bruteforce",
+			Filename: "vhosts.txt",
+			URL:      "https://cdn.jsdelivr.net/gh/danielmiessler/SecLists@master/Discovery/DNS/subdomains-top1million-5000.txt",
+			FallbackURLs: []string{
+				"https://raw.githubusercontent.com/danielmiessler/SecLists/main/Discovery/DNS/subdomains-top1million-5000.txt",
+			},
+			Description: "VHost/subdomain wordlist for host header fuzzing",
+			Required:    false,
+		},
 	}
 }
 

@@ -557,6 +557,94 @@ func (i *Installer) GetSystemTools() []string {
 	return tools
 }
 
+// ChromeInfo holds Chrome installation details
+type ChromeInfo struct {
+	Installed bool
+	Path      string
+	Version   string
+}
+
+// Common Chrome paths by OS (exported for use by other packages)
+var ChromePaths = map[string][]string{
+	"darwin": {
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		"/Applications/Chromium.app/Contents/MacOS/Chromium",
+		"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+	},
+	"linux": {
+		"/usr/bin/google-chrome",
+		"/usr/bin/google-chrome-stable",
+		"/usr/bin/chromium",
+		"/usr/bin/chromium-browser",
+		"/snap/bin/chromium",
+	},
+	"windows": {
+		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+		`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+	},
+}
+
+// CheckChrome checks if Chrome/Chromium is installed and returns its info
+func (i *Installer) CheckChrome() *ChromeInfo {
+	info := &ChromeInfo{}
+
+	// Check common paths for this OS
+	paths, ok := ChromePaths[i.platform.OS]
+	if !ok {
+		return info
+	}
+
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			info.Installed = true
+			info.Path = p
+
+			// Try to get version
+			out, err := exec.Command(p, "--version").Output()
+			if err == nil {
+				info.Version = strings.TrimSpace(string(out))
+			}
+			return info
+		}
+	}
+
+	// Also check if it's in PATH (common on Linux)
+	for _, name := range []string{"google-chrome", "chromium", "chromium-browser"} {
+		if path, err := exec.LookPath(name); err == nil {
+			info.Installed = true
+			info.Path = path
+			out, _ := exec.Command(path, "--version").Output()
+			info.Version = strings.TrimSpace(string(out))
+			return info
+		}
+	}
+
+	return info
+}
+
+// GetChromeInstallInstructions returns OS-specific Chrome install instructions
+func (i *Installer) GetChromeInstallInstructions() string {
+	switch i.platform.OS {
+	case "darwin":
+		return "Install Google Chrome from https://www.google.com/chrome/ or run: brew install --cask google-chrome"
+	case "linux":
+		switch i.platform.PkgMgr {
+		case "apt", "apt-get":
+			return "Install Chromium: sudo apt install chromium-browser"
+		case "dnf":
+			return "Install Chromium: sudo dnf install chromium"
+		case "pacman":
+			return "Install Chromium: sudo pacman -S chromium"
+		default:
+			return "Install Google Chrome or Chromium browser"
+		}
+	case "windows":
+		return "Install Google Chrome from https://www.google.com/chrome/"
+	default:
+		return "Install Google Chrome or Chromium browser"
+	}
+}
+
 // DownloadFile downloads a file from a URL to the specified path
 func DownloadFile(url, filepath string) error {
 	resp, err := http.Get(url)

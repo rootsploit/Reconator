@@ -47,6 +47,12 @@ func (r *Runner) Run() error {
 	green := color.New(color.FgGreen)
 	cyan := color.New(color.FgCyan, color.Bold)
 	yellow := color.New(color.FgYellow)
+	red := color.New(color.FgRed, color.Bold)
+
+	// Deprecation Warning
+	red.Println("\n[DEPRECATED] You are using the legacy sequential runner.")
+	red.Println("             This runner will be removed in v2.2. Please migrate to the new pipeline executor.")
+	red.Println("             Run without '--legacy' flag to use the new default pipeline.\n")
 
 	// Enable debug logging if requested
 	if r.cfg.Debug {
@@ -108,7 +114,19 @@ func (r *Runner) process(target string) error {
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return err
 	}
-	r.out = output.NewManager(outDir)
+
+	// Initialize output manager (with SQLite if enabled)
+	if r.cfg.EnableSQLite {
+		var err error
+		r.out, err = output.NewManagerWithSQLite(outDir)
+		if err != nil {
+			// Non-fatal, warning already printed by NewManagerWithSQLite
+			r.out = output.NewManager(outDir)
+		}
+	} else {
+		r.out = output.NewManager(outDir)
+	}
+	defer r.out.Close()
 	r.out.SetScanMeta(target, version.Version)
 
 	var subs, allSubs, alive, directHosts []string
@@ -116,6 +134,7 @@ func (r *Runner) process(target string) error {
 	var takeoverRes *takeover.Result
 	var historicRes *historic.Result
 	var wafRes *waf.Result
+	var portsRes *portscan.Result
 	var osintRes interface{}
 	var graphqlRes *vulnscan.GraphQLResult
 
@@ -145,12 +164,12 @@ func (r *Runner) process(target string) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// Parallel Group A: WAF + Takeover + Historic (run concurrently)
+	// Phase 2-5: WAF + Takeover + Historic (run concurrently)
 	// These phases only depend on subdomains, not on each other
 	// CRITICAL: WAF must complete before Ports can start
 	// ═══════════════════════════════════════════════════════════════════════
-	cyan.Println("[Parallel Group A] WAF + Takeover + Historic")
-	fmt.Println("─────────────────────────────────────────────────")
+	cyan.Println("[Phase 2/4/5] WAF Detection + Takeover + Historic (parallel)")
+	fmt.Println("───────────────────────────────────────────────────")
 
 	var wg sync.WaitGroup
 	var wafMu, takeoverMu, historicMu, osintMu sync.Mutex
@@ -233,12 +252,10 @@ func (r *Runner) process(target string) error {
 		}()
 	}
 
-	// Wait for all Group A phases to complete
+	// Wait for Phase 2/4/5 to complete
 	wg.Wait()
-	groupADuration := time.Since(start) - time.Since(start) // will be recalculated
-	_ = groupADuration
 
-	// Print Group A results
+	// Print Phase 2/4/5 results
 	if wafRes != nil {
 		green.Printf("    WAF:      CDN: %d, Direct: %d\n", len(wafRes.CDNHosts), len(wafRes.DirectHosts))
 		r.out.SaveWAFResults(wafRes)
@@ -273,6 +290,7 @@ func (r *Runner) process(target string) error {
 
 		s := portscan.NewScanner(r.cfg, r.c)
 		if res, err := s.Scan(subs); err == nil {
+			portsRes = res
 			alive = res.AliveHosts
 			green.Printf("    Ports: %d, Alive: %d, TLS: %d\n\n", res.TotalPorts, len(alive), len(res.TLSInfo))
 			r.out.SavePortResults(res)
@@ -309,15 +327,15 @@ func (r *Runner) process(target string) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// Parallel Group B: Tech Detection + Directory Bruteforce
+	// Phase 6/7: Tech Detection + Directory Bruteforce (parallel)
 	// Both depend on alive hosts from port scanning
 	// ═══════════════════════════════════════════════════════════════════════
 	var techRes *techdetect.Result
 	var dirRes *dirbrute.Result
 
 	if !r.cfg.PassiveMode && len(alive) > 0 {
-		cyan.Println("[Parallel Group B] Tech Detection + DirBrute")
-		fmt.Println("─────────────────────────────────────────────────")
+		cyan.Println("[Phase 6/7] Tech Detection + DirBrute (parallel)")
+		fmt.Println("───────────────────────────────────────────────────")
 
 		var wgB sync.WaitGroup
 		var techMu, dirMu, graphqlMu sync.Mutex
@@ -400,7 +418,7 @@ func (r *Runner) process(target string) error {
 		}
 		fmt.Println()
 	} else if r.cfg.PassiveMode {
-		yellow.Println("[Parallel Group B] Tech + DirBrute... SKIPPED (passive mode)")
+		yellow.Println("[Phase 6/7] Tech + DirBrute... SKIPPED (passive mode)")
 		fmt.Println()
 	}
 
@@ -433,28 +451,38 @@ func (r *Runner) process(target string) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// Phase X: Screenshots (after vuln scan, using alive hosts)
+	// Phase 9: Visual Recon - Screenshots with clustering
 	// ═══════════════════════════════════════════════════════════════════════
 	if r.cfg.EnableScreenshots && !r.cfg.PassiveMode && len(alive) > 0 {
-		cyan.Println("[Phase X] Capturing Screenshots")
-		fmt.Println("─────────────────────────────────────────────────")
+		cyan.Println("[Phase 9] Visual Recon (Screenshots)")
+		fmt.Println("───────────────────────────────────────────────────")
 		sc := screenshot.NewCapturer(r.cfg, r.c)
-		if err := sc.Capture(alive); err != nil {
+		res, err := sc.CaptureWithResult(alive)
+		if err != nil {
 			yellow.Printf("    ⚠ Screenshot capture failed: %v\n", err)
 		} else {
-			green.Printf("    Screenshots captured in %s/screenshots\n", outDir)
+			green.Printf("    Captured: %d screenshots\n", res.TotalCaptures)
+			if len(res.Clusters) > 0 {
+				green.Printf("    Clusters: %d groups found\n", len(res.Clusters))
+				for _, cluster := range res.Clusters {
+					if cluster.Count >= 3 {
+						green.Printf("        %s: %d pages\n", cluster.Name, cluster.Count)
+					}
+				}
+			}
+			r.out.SaveScreenshotResults(res)
 		}
 		fmt.Println()
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// Phase 9: AI-Guided Scanning (final analysis phase)
+	// Phase 10: AI-Guided Scanning (final analysis phase)
 	// ═══════════════════════════════════════════════════════════════════════
 	var aiRes *aiguided.Result
 	hasAIKeys := r.cfg.OpenAIKey != "" || r.cfg.ClaudeKey != "" || r.cfg.GeminiKey != ""
 	if !r.cfg.PassiveMode && !r.cfg.SkipAIGuided && hasAIKeys && (r.cfg.ShouldRunPhase("aiguided") || r.cfg.ShouldRunPhase("all")) && len(alive) > 0 {
-		cyan.Println("[Phase 9] AI-Guided Scanning")
-		fmt.Println("─────────────────────────────────────────────────")
+		cyan.Println("[Phase 10] AI-Guided Scanning")
+		fmt.Println("───────────────────────────────────────────────────")
 
 		// Build target context for AI
 		ctx := &aiguided.TargetContext{
@@ -478,15 +506,15 @@ func (r *Runner) process(target string) error {
 			r.out.SaveAIGuidedResults(res)
 		}
 	} else if r.cfg.SkipAIGuided || !hasAIKeys {
-		yellow.Println("[Phase 9] AI-Guided Scanning... SKIPPED (no AI keys or disabled)")
+		yellow.Println("[Phase 10] AI-Guided Scanning... SKIPPED (no AI keys or disabled)")
 		fmt.Println()
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
-	// Phase 10: Alerting (send notifications if enabled)
+	// Post-scan: Alerting (send notifications if enabled)
 	// ═══════════════════════════════════════════════════════════════════════
 	if r.cfg.EnableNotify && r.c.IsInstalled("notify") {
-		cyan.Println("[Phase 10] Sending Alerts")
+		cyan.Println("[Alerting] Sending Notifications")
 		fmt.Println("─────────────────────────────────────────────────")
 
 		summary := &alerting.Summary{
@@ -543,25 +571,15 @@ func (r *Runner) process(target string) error {
 			Duration:  time.Since(start).Round(time.Second).String(),
 			Subdomain: subRes,
 			WAF:       wafRes,
-			Ports:     nil, // Need to refactor out.SavePortResults to keep struct or manually map. Assuming portsRes accessible?
-			// Actually portscan.Result was scoped in if block.
-			// Logic flaw: 'res' variable in Phase 3 is local. 'alive' is global.
-			// I should assume report gets limited data or I need to hoist 'portRes' variable.
-			// Let's hoist the variables in the beginning.
-			Takeover: takeoverRes,
-			Historic: historicRes,
-			Tech:     techRes,
-			DirBrute: dirRes,
-			VulnScan: vulnRes,
-			AIGuided: aiRes,
-			OSINT:    osintRes,
+			Ports:     portsRes,
+			Takeover:  takeoverRes,
+			Historic:  historicRes,
+			Tech:      techRes,
+			DirBrute:  dirRes,
+			VulnScan:  vulnRes,
+			AIGuided:  aiRes,
+			OSINT:     osintRes,
 		}
-		// NOTE: Ports result is missing because it was shadowed.
-		// I will update the report generation to be resilient or fix scope in next step if compilation fails.
-		// Actually, I can fix loop scope now? No, 'res' for ports was declared inside 'if'.
-		// I will leave it nil for now and rely on future refactor, OR try to capture it if feasible.
-		// Wait, I can't pass 'res' from inside the if block to here.
-		// I'll skip Ports detail in report for this specific patch to avoid massive refactor of variable scopes.
 
 		if err := report.Generate(reportData, outDir); err != nil {
 			yellow.Printf("⚠ Failed to generate report: %v\n", err)
@@ -576,6 +594,12 @@ func (r *Runner) process(target string) error {
 	green.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	r.out.SaveSummary(target)
+
+	// Update scan status in SQLite if enabled
+	if r.out.HasSQLite() {
+		r.out.SQLiteDB().UpdateScanStatus(context.Background(), r.out.ScanID(), "completed")
+	}
+
 	return nil
 }
 
@@ -605,7 +629,18 @@ func (r *Runner) processASNTarget(target string) error {
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return err
 	}
-	r.out = output.NewManager(outDir)
+
+	// Initialize output manager (with SQLite if enabled)
+	if r.cfg.EnableSQLite {
+		var err error
+		r.out, err = output.NewManagerWithSQLite(outDir)
+		if err != nil {
+			r.out = output.NewManager(outDir)
+		}
+	} else {
+		r.out = output.NewManager(outDir)
+	}
+	defer r.out.Close()
 	r.out.SetScanMeta(displayASN, version.Version)
 
 	// Phase 0: ASN to CIDR/Domain Discovery
@@ -682,7 +717,18 @@ func (r *Runner) processIPTarget(target string) error {
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return err
 	}
-	r.out = output.NewManager(outDir)
+
+	// Initialize output manager (with SQLite if enabled)
+	if r.cfg.EnableSQLite {
+		var err error
+		r.out, err = output.NewManagerWithSQLite(outDir)
+		if err != nil {
+			r.out = output.NewManager(outDir)
+		}
+	} else {
+		r.out = output.NewManager(outDir)
+	}
+	defer r.out.Close()
 	r.out.SetScanMeta(target, version.Version)
 
 	// Phase 0: IP Range Discovery
@@ -772,7 +818,19 @@ func (r *Runner) processDomain(domain string, preDiscoveredSubs []string) error 
 	if err := os.MkdirAll(domainDir, 0755); err != nil {
 		return err
 	}
-	domainOut := output.NewManager(domainDir)
+
+	// Initialize output manager (with SQLite if enabled)
+	var domainOut *output.Manager
+	if r.cfg.EnableSQLite {
+		var err error
+		domainOut, err = output.NewManagerWithSQLite(domainDir)
+		if err != nil {
+			domainOut = output.NewManager(domainDir)
+		}
+	} else {
+		domainOut = output.NewManager(domainDir)
+	}
+	defer domainOut.Close()
 
 	var subs, allSubs, alive, directHosts []string
 	var subRes *subdomain.Result

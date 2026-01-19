@@ -2,28 +2,39 @@ package pipeline
 
 import (
 	"context"
+	"path/filepath"
 	"time"
 
+	"github.com/rootsploit/reconator/internal/aiguided"
 	"github.com/rootsploit/reconator/internal/config"
+	"github.com/rootsploit/reconator/internal/dirbrute"
 	"github.com/rootsploit/reconator/internal/historic"
+	"github.com/rootsploit/reconator/internal/iprange"
 	"github.com/rootsploit/reconator/internal/portscan"
+	"github.com/rootsploit/reconator/internal/screenshot"
 	"github.com/rootsploit/reconator/internal/subdomain"
 	"github.com/rootsploit/reconator/internal/takeover"
 	"github.com/rootsploit/reconator/internal/techdetect"
 	"github.com/rootsploit/reconator/internal/tools"
+	"github.com/rootsploit/reconator/internal/vhost"
 	"github.com/rootsploit/reconator/internal/vulnscan"
 	"github.com/rootsploit/reconator/internal/waf"
 )
 
 // RegisterAllAdapters registers all phase adapters with the executor
 func RegisterAllAdapters(exec *Executor, cfg *config.Config, checker *tools.Checker) {
+	exec.Register(NewIPRangeAdapter(cfg, checker))
 	exec.Register(NewSubdomainAdapter(cfg, checker))
 	exec.Register(NewWAFAdapter(cfg, checker))
 	exec.Register(NewPortsAdapter(cfg, checker))
+	exec.Register(NewVHostAdapter(cfg, checker))
 	exec.Register(NewTakeoverAdapter(cfg, checker))
 	exec.Register(NewHistoricAdapter(cfg, checker))
 	exec.Register(NewTechAdapter(cfg, checker))
+	exec.Register(NewDirBruteAdapter(cfg, checker))
 	exec.Register(NewVulnScanAdapter(cfg, checker))
+	exec.Register(NewScreenshotAdapter(cfg, checker))
+	exec.Register(NewAIGuidedAdapter(cfg, checker))
 }
 
 // SubdomainAdapter wraps subdomain.Enumerator as a PhaseExecutor
@@ -134,6 +145,50 @@ func (a *PortsAdapter) Execute(ctx context.Context, input *PhaseInput) (*PhaseRe
 	}
 
 	res, err := a.scanner.Scan(input.Subdomains)
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(start)
+
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = err
+		return result, err
+	}
+
+	result.Status = StatusCompleted
+	result.Data = res
+	return result, nil
+}
+
+// VHostAdapter wraps vhost.Discoverer as a PhaseExecutor
+type VHostAdapter struct {
+	discoverer *vhost.Discoverer
+}
+
+func NewVHostAdapter(cfg *config.Config, checker *tools.Checker) *VHostAdapter {
+	return &VHostAdapter{
+		discoverer: vhost.NewDiscoverer(cfg, checker),
+	}
+}
+
+func (a *VHostAdapter) Name() Phase { return PhaseVHost }
+
+func (a *VHostAdapter) Execute(ctx context.Context, input *PhaseInput) (*PhaseResult, error) {
+	start := time.Now()
+	result := &PhaseResult{
+		Phase:     PhaseVHost,
+		Status:    StatusRunning,
+		StartTime: start,
+	}
+
+	if !input.HasAliveHosts() {
+		result.Status = StatusSkipped
+		result.EndTime = time.Now()
+		result.Duration = result.EndTime.Sub(start)
+		return result, nil
+	}
+
+	// Use alive hosts for VHost discovery
+	res, err := a.discoverer.Discover(input.AliveHosts, input.Target)
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(start)
 
@@ -323,7 +378,238 @@ func (a *VulnScanAdapter) Execute(ctx context.Context, input *PhaseInput) (*Phas
 		}
 	}
 
-	res, err := a.scanner.Scan(input.AliveHosts, categorized)
+	// Build tech input for tech-aware scanning
+	var techInput *vulnscan.TechInput
+	if input.HasTechStack() {
+		techInput = &vulnscan.TechInput{
+			TechByHost: input.TechByHost,
+			TechCount:  input.TechCount,
+		}
+	}
+
+	// Use tech-aware scanning when tech data is available
+	res, err := a.scanner.ScanWithTech(input.AliveHosts, categorized, techInput)
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(start)
+
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = err
+		return result, err
+	}
+
+	result.Status = StatusCompleted
+	result.Data = res
+	return result, nil
+}
+
+// ScreenshotAdapter wraps screenshot.Capturer as a PhaseExecutor
+type ScreenshotAdapter struct {
+	capturer *screenshot.Capturer
+}
+
+func NewScreenshotAdapter(cfg *config.Config, checker *tools.Checker) *ScreenshotAdapter {
+	return &ScreenshotAdapter{
+		capturer: screenshot.NewCapturer(cfg, checker),
+	}
+}
+
+func (a *ScreenshotAdapter) Name() Phase { return PhaseScreenshot }
+
+func (a *ScreenshotAdapter) Execute(ctx context.Context, input *PhaseInput) (*PhaseResult, error) {
+	start := time.Now()
+	result := &PhaseResult{
+		Phase:     PhaseScreenshot,
+		Status:    StatusRunning,
+		StartTime: start,
+	}
+
+	if !input.HasAliveHosts() {
+		result.Status = StatusSkipped
+		result.EndTime = time.Now()
+		result.Duration = result.EndTime.Sub(start)
+		return result, nil
+	}
+
+	// Use target-specific output directory for screenshots
+	outputDir := filepath.Join(input.Config.OutputDir, input.Target)
+
+	// Capture screenshots and cluster them
+	res, err := a.capturer.CaptureWithResultInDir(input.AliveHosts, outputDir)
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(start)
+
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = err
+		return result, err
+	}
+
+	result.Status = StatusCompleted
+	result.Data = res
+	return result, nil
+}
+
+// IPRangeAdapter wraps iprange.Discoverer as a PhaseExecutor
+type IPRangeAdapter struct {
+	discoverer *iprange.Discoverer
+}
+
+func NewIPRangeAdapter(cfg *config.Config, checker *tools.Checker) *IPRangeAdapter {
+	return &IPRangeAdapter{
+		discoverer: iprange.NewDiscoverer(cfg, checker),
+	}
+}
+
+func (a *IPRangeAdapter) Name() Phase { return PhaseIPRange }
+
+func (a *IPRangeAdapter) Execute(ctx context.Context, input *PhaseInput) (*PhaseResult, error) {
+	start := time.Now()
+	result := &PhaseResult{
+		Phase:     PhaseIPRange,
+		Status:    StatusRunning,
+		StartTime: start,
+	}
+
+	// Check if target is IP/CIDR/ASN
+	target := input.Target
+	if !iprange.IsIPTarget(target) && !iprange.IsASN(target) {
+		// Not an IP-based target, skip this phase
+		result.Status = StatusSkipped
+		result.EndTime = time.Now()
+		result.Duration = result.EndTime.Sub(start)
+		return result, nil
+	}
+
+	var res *iprange.Result
+	var err error
+
+	if iprange.IsASN(target) {
+		res, err = a.discoverer.DiscoverFromASN(target)
+	} else {
+		res, err = a.discoverer.Discover(target)
+	}
+
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(start)
+
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = err
+		return result, err
+	}
+
+	result.Status = StatusCompleted
+	result.Data = res
+	return result, nil
+}
+
+// DirBruteAdapter wraps dirbrute.Scanner as a PhaseExecutor
+type DirBruteAdapter struct {
+	scanner *dirbrute.Scanner
+}
+
+func NewDirBruteAdapter(cfg *config.Config, checker *tools.Checker) *DirBruteAdapter {
+	return &DirBruteAdapter{
+		scanner: dirbrute.NewScanner(cfg, checker),
+	}
+}
+
+func (a *DirBruteAdapter) Name() Phase { return PhaseDirBrute }
+
+func (a *DirBruteAdapter) Execute(ctx context.Context, input *PhaseInput) (*PhaseResult, error) {
+	start := time.Now()
+	result := &PhaseResult{
+		Phase:     PhaseDirBrute,
+		Status:    StatusRunning,
+		StartTime: start,
+	}
+
+	if !input.HasAliveHosts() {
+		result.Status = StatusSkipped
+		result.EndTime = time.Now()
+		result.Duration = result.EndTime.Sub(start)
+		return result, nil
+	}
+
+	// Use direct hosts (non-WAF) if available, otherwise all alive hosts
+	hosts := input.GetHostsForScanning()
+
+	res, err := a.scanner.Scan(hosts)
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(start)
+
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = err
+		return result, err
+	}
+
+	result.Status = StatusCompleted
+	result.Data = res
+	return result, nil
+}
+
+// AIGuidedAdapter wraps aiguided.Scanner as a PhaseExecutor
+type AIGuidedAdapter struct {
+	scanner *aiguided.Scanner
+}
+
+func NewAIGuidedAdapter(cfg *config.Config, checker *tools.Checker) *AIGuidedAdapter {
+	return &AIGuidedAdapter{
+		scanner: aiguided.NewScanner(cfg, checker),
+	}
+}
+
+func (a *AIGuidedAdapter) Name() Phase { return PhaseAIGuided }
+
+func (a *AIGuidedAdapter) Execute(ctx context.Context, input *PhaseInput) (*PhaseResult, error) {
+	start := time.Now()
+	result := &PhaseResult{
+		Phase:     PhaseAIGuided,
+		Status:    StatusRunning,
+		StartTime: start,
+	}
+
+	if !input.HasAliveHosts() {
+		result.Status = StatusSkipped
+		result.EndTime = time.Now()
+		result.Duration = result.EndTime.Sub(start)
+		return result, nil
+	}
+
+	// Build target context from previous phases
+	targetCtx := &aiguided.TargetContext{
+		Domain:       input.Target,
+		Technologies: []string{},
+		Endpoints:    input.URLs,
+		JSFiles:      []string{},
+		APIEndpoints: []string{},
+		Services:     []string{},
+		WAFDetected:  len(input.CDNHosts) > 0,
+		CDNHosts:     len(input.CDNHosts),
+	}
+
+	// Extract technologies from TechByHost
+	if input.TechByHost != nil {
+		techSet := make(map[string]bool)
+		for _, techs := range input.TechByHost {
+			for _, tech := range techs {
+				techSet[tech] = true
+			}
+		}
+		for tech := range techSet {
+			targetCtx.Technologies = append(targetCtx.Technologies, tech)
+		}
+	}
+
+	// Extract JS files and API endpoints from categorized URLs
+	if input.CategorizedURLs != nil {
+		targetCtx.JSFiles = input.CategorizedURLs.JSFiles
+		targetCtx.APIEndpoints = input.CategorizedURLs.APIFiles
+	}
+
+	res, err := a.scanner.Scan(input.AliveHosts, targetCtx)
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(start)
 

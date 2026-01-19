@@ -1,6 +1,7 @@
 package output
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/rootsploit/reconator/internal/historic"
 	"github.com/rootsploit/reconator/internal/iprange"
 	"github.com/rootsploit/reconator/internal/portscan"
+	"github.com/rootsploit/reconator/internal/screenshot"
 	"github.com/rootsploit/reconator/internal/storage"
 	"github.com/rootsploit/reconator/internal/subdomain"
 	"github.com/rootsploit/reconator/internal/takeover"
@@ -32,6 +34,9 @@ type Manager struct {
 	target    string
 	version   string
 	startTime time.Time
+
+	// SQLite storage (optional, for dashboard queries)
+	sqliteDB *storage.SQLiteStorage
 }
 
 // NewManager creates a new output manager
@@ -44,11 +49,56 @@ func NewManager(outputDir string) *Manager {
 	}
 }
 
+// NewManagerWithSQLite creates an output manager with SQLite persistence
+func NewManagerWithSQLite(outputDir string) (*Manager, error) {
+	m := NewManager(outputDir)
+
+	// Initialize SQLite storage in the output directory
+	sqliteDB, err := storage.NewSQLiteStorage(outputDir)
+	if err != nil {
+		// Non-fatal: fall back to file-only storage
+		fmt.Printf("Warning: SQLite initialization failed: %v (using file storage only)\n", err)
+		return m, nil
+	}
+
+	m.sqliteDB = sqliteDB
+	return m, nil
+}
+
+// Close closes the SQLite connection if open
+func (m *Manager) Close() error {
+	if m.sqliteDB != nil {
+		return m.sqliteDB.Close()
+	}
+	return nil
+}
+
+// HasSQLite returns true if SQLite storage is enabled
+func (m *Manager) HasSQLite() bool {
+	return m.sqliteDB != nil
+}
+
+// SQLiteDB returns the SQLite storage instance (may be nil)
+func (m *Manager) SQLiteDB() *storage.SQLiteStorage {
+	return m.sqliteDB
+}
+
 // SetScanMeta sets scan-level metadata (call once at scan start)
-// Zero overhead: just stores values, no I/O
+// Also creates a scan record in SQLite if enabled
 func (m *Manager) SetScanMeta(target, version string) {
 	m.target = target
 	m.version = version
+
+	// Create scan record in SQLite if enabled
+	if m.sqliteDB != nil {
+		ctx := context.Background()
+		m.sqliteDB.CreateScan(ctx, m.scanID, target, version, nil)
+	}
+}
+
+// SetScanID sets the scan ID (used when resuming an interrupted scan)
+func (m *Manager) SetScanID(scanID string) {
+	m.scanID = scanID
 }
 
 // ScanID returns the unique scan identifier
@@ -115,6 +165,26 @@ func (m *Manager) SaveSubdomains(result *subdomain.Result) error {
 		m.saveLines(filepath.Join(dir, "all_subdomains.txt"), result.AllSubdomains)
 	}
 
+	// Persist to SQLite if enabled
+	if m.sqliteDB != nil {
+		ctx := context.Background()
+		// Build isAlive map (validated subdomains are alive)
+		isAlive := make(map[string]bool)
+		for _, sub := range result.Subdomains {
+			isAlive[sub] = true
+		}
+		// Build sources map
+		sources := make(map[string]string)
+		for source := range result.Sources {
+			for _, sub := range result.AllSubdomains {
+				if sources[sub] == "" {
+					sources[sub] = source
+				}
+			}
+		}
+		m.sqliteDB.SaveSubdomains(ctx, m.scanID, result.AllSubdomains, isAlive, sources)
+	}
+
 	return nil
 }
 
@@ -173,6 +243,19 @@ func (m *Manager) SavePortResults(result *portscan.Result) error {
 		m.saveJSON(filepath.Join(dir, "tls_info.json"), result.TLSInfo)
 	}
 
+	// Persist to SQLite if enabled
+	if m.sqliteDB != nil {
+		ctx := context.Background()
+		// Convert TLSData structs to JSON strings for storage
+		tlsStrings := make(map[string]string)
+		for host, tlsData := range result.TLSInfo {
+			if jsonBytes, err := json.Marshal(tlsData); err == nil {
+				tlsStrings[host] = string(jsonBytes)
+			}
+		}
+		m.sqliteDB.SavePorts(ctx, m.scanID, result.OpenPorts, tlsStrings)
+	}
+
 	return nil
 }
 
@@ -197,6 +280,24 @@ func (m *Manager) SaveTakeoverResults(result *takeover.Result) error {
 			vulnList = append(vulnList, fmt.Sprintf("%s | %s | %s | %s", v.Subdomain, svc, v.Severity, v.Tool))
 		}
 		m.saveLines(filepath.Join(dir, "vulnerable.txt"), vulnList)
+	}
+
+	// Persist to SQLite if enabled (takeover vulns are stored in vulnerabilities table)
+	if m.sqliteDB != nil && len(result.Vulnerable) > 0 {
+		ctx := context.Background()
+		var vulns []storage.VulnerabilityRecord
+		for _, v := range result.Vulnerable {
+			vulns = append(vulns, storage.VulnerabilityRecord{
+				Host:       v.Subdomain,
+				URL:        "",
+				TemplateID: "subdomain-takeover",
+				Name:       fmt.Sprintf("Subdomain Takeover: %s", v.Service),
+				Severity:   v.Severity,
+				Tool:       v.Tool,
+				Evidence:   v.Details,
+			})
+		}
+		m.sqliteDB.SaveVulnerabilities(ctx, m.scanID, vulns)
 	}
 
 	return nil
@@ -227,6 +328,18 @@ func (m *Manager) SaveHistoricResults(result *historic.Result) error {
 	endpoints := historic.ExtractEndpoints(result.URLs)
 	if len(endpoints) > 0 {
 		m.saveLines(filepath.Join(dir, "endpoints.txt"), endpoints)
+	}
+
+	// Persist to SQLite if enabled
+	if m.sqliteDB != nil && len(result.URLs) > 0 {
+		ctx := context.Background()
+		sources := make(map[string]string)
+		categories := make(map[string]string)
+		// Mark interesting URLs
+		for _, url := range interesting {
+			categories[url] = "interesting"
+		}
+		m.sqliteDB.SaveURLs(ctx, m.scanID, result.URLs, sources, categories)
 	}
 
 	return nil
@@ -260,6 +373,12 @@ func (m *Manager) SaveTechResults(result *techdetect.Result) error {
 		}
 		sort.Strings(lines)
 		m.saveLines(filepath.Join(dir, "tech_summary.txt"), lines)
+	}
+
+	// Persist to SQLite if enabled
+	if m.sqliteDB != nil && len(result.TechByHost) > 0 {
+		ctx := context.Background()
+		m.sqliteDB.SaveTechnologies(ctx, m.scanID, result.TechByHost)
 	}
 
 	return nil
@@ -340,13 +459,69 @@ func (m *Manager) SaveVulnResults(result *vulnscan.Result) error {
 		m.saveLines(filepath.Join(dir, "all_vulnerabilities.txt"), all)
 	}
 
+	// Persist to SQLite if enabled
+	if m.sqliteDB != nil && len(result.Vulnerabilities) > 0 {
+		ctx := context.Background()
+		var vulns []storage.VulnerabilityRecord
+		for _, v := range result.Vulnerabilities {
+			vulns = append(vulns, storage.VulnerabilityRecord{
+				Host:       v.Host,
+				URL:        v.URL,
+				TemplateID: v.TemplateID,
+				Name:       v.Name,
+				Severity:   v.Severity,
+				Tool:       v.Tool,
+				Evidence:   "",
+			})
+		}
+		m.sqliteDB.SaveVulnerabilities(ctx, m.scanID, vulns)
+	}
+
+	return nil
+}
+
+// SaveScreenshotResults saves screenshot capture and clustering results
+func (m *Manager) SaveScreenshotResults(result *screenshot.Result) error {
+	m.results["screenshot"] = result
+	dir := m.phaseDir("9-screenshots")
+
+	// Save JSON with clustering data
+	if err := m.saveJSON(filepath.Join(dir, "screenshot_results.json"), result); err != nil {
+		return err
+	}
+
+	// Save cluster summary
+	if len(result.Clusters) > 0 {
+		var lines []string
+		for _, cluster := range result.Clusters {
+			lines = append(lines, fmt.Sprintf("%s: %d screenshots", cluster.Name, cluster.Count))
+		}
+		m.saveLines(filepath.Join(dir, "cluster_summary.txt"), lines)
+	}
+
+	// Persist to SQLite if enabled
+	if m.sqliteDB != nil && len(result.Screenshots) > 0 {
+		ctx := context.Background()
+		var screenshots []storage.ScreenshotRecord
+		for _, ss := range result.Screenshots {
+			screenshots = append(screenshots, storage.ScreenshotRecord{
+				URL:         ss.URL,
+				FilePath:    ss.FilePath,
+				Hash:        ss.Hash,
+				ClusterID:   ss.ClusterID,
+				ClusterName: "", // ClusterName resolved from clusters map if needed
+			})
+		}
+		m.sqliteDB.SaveScreenshots(ctx, m.scanID, screenshots)
+	}
+
 	return nil
 }
 
 // SaveAIGuidedResults saves AI-guided scanning results
 func (m *Manager) SaveAIGuidedResults(result *aiguided.Result) error {
 	m.results["aiguided"] = result
-	dir := m.phaseDir("9-aiguided")
+	dir := m.phaseDir("10-aiguided")
 
 	// Save JSON
 	if err := m.saveJSON(filepath.Join(dir, "ai_guided.json"), result); err != nil {

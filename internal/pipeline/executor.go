@@ -166,8 +166,8 @@ func GetExecutionOrder() [][]Phase {
 		// Level 2: Depend on ports
 		{PhasePorts},
 		// Level 3: Depend on ports (can run in parallel)
-		{PhaseTech, PhaseDirBrute},
-		// Level 4: Depend on multiple phases
+		{PhaseTech, PhaseDirBrute, PhaseScreenshot},
+		// Level 4: Depend on multiple phases (tech-aware vulnscan needs tech data)
 		{PhaseVulnScan},
 		// Level 5: Final analysis
 		{PhaseAIGuided},
