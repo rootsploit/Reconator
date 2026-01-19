@@ -1,0 +1,46 @@
+# Binaries
+reconator
+reconator-*
+*.exe
+dist/
+
+# Test results (contains target-specific data)
+results/
+output/
+screenshots/
+report_*.html
+
+# Temp files from scans
+*.txt
+!wordlists/*.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.code-workspace
+
+# Temporary files
+*.tmp
+*.log
+
+# Go build
+*.test
+__debug_bin*
+coverage.out
+
+# Configuration with secrets
+configs/
+!configs/*.example.yaml
+~/.reconator/
+
+# Sample outputs (for development)
+sample_*.html
+
+# Development docs (internal notes)
+dev-docs/
