@@ -1,6 +1,7 @@
 package vulnscan
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -382,6 +383,38 @@ func (s *Scanner) ScanWithTech(hosts []string, categorizedURLs *historic.Categor
 				fmt.Printf("        nuclei-targeted: %d vulnerabilities found\n", len(vulns))
 			}()
 		}
+	}
+
+	// Run secret scanner on JS files and URLs (parallel with other scans)
+	if categorizedURLs != nil && len(categorizedURLs.JSFiles) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Printf("        Running secret scanner on %d JS files/URLs...\n", len(categorizedURLs.JSFiles))
+			detector := NewSecretDetector(s.cfg)
+			secretResult, err := detector.DetectSecrets(context.Background(), nil, categorizedURLs.JSFiles)
+			if err != nil {
+				fmt.Printf("        secret scanner error: %v\n", err)
+				return
+			}
+			// Convert secrets to vulnerabilities
+			if secretResult != nil && len(secretResult.Secrets) > 0 {
+				mu.Lock()
+				for _, secret := range secretResult.Secrets {
+					result.Vulnerabilities = append(result.Vulnerabilities, Vulnerability{
+						URL:         secret.Source,
+						TemplateID:  "secret-" + strings.ToLower(strings.ReplaceAll(secret.Type, " ", "-")),
+						Name:        secret.Type + " exposed",
+						Severity:    secret.Severity,
+						Type:        "secret",
+						Description: fmt.Sprintf("Exposed %s found in %s", secret.Type, secret.Source),
+						Tool:        "secret-scanner",
+					})
+				}
+				mu.Unlock()
+				fmt.Printf("        secret scanner: %d secrets found\n", len(secretResult.Secrets))
+			}
+		}()
 	}
 
 	wg.Wait()

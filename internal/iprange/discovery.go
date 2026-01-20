@@ -1,8 +1,11 @@
 package iprange
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"regexp"
 	"sort"
 	"strings"
@@ -71,7 +74,8 @@ func IsASN(target string) bool {
 	return true
 }
 
-// DiscoverFromASN finds domains and IP ranges associated with an ASN using asnmap
+// DiscoverFromASN finds domains and IP ranges associated with an ASN
+// Uses asnmap if installed, otherwise falls back to free APIs (RIPEstat, HackerTarget, BGPView)
 func (d *Discoverer) DiscoverFromASN(asn string) (*Result, error) {
 	start := time.Now()
 	result := &Result{
@@ -80,29 +84,69 @@ func (d *Discoverer) DiscoverFromASN(asn string) (*Result, error) {
 		IPToDomains: make(map[string][]string),
 	}
 
-	if !d.c.IsInstalled("asnmap") {
-		return nil, fmt.Errorf("asnmap not installed (run 'reconator install --extras')")
-	}
-
 	// Normalize ASN format (ensure AS prefix)
 	normalizedASN := strings.ToUpper(strings.TrimSpace(asn))
 	if !strings.HasPrefix(normalizedASN, "AS") {
 		normalizedASN = "AS" + normalizedASN
 	}
+	// Also get numeric-only version for some APIs
+	asnNumber := strings.TrimPrefix(normalizedASN, "AS")
 
 	fmt.Printf("    [*] Querying ASN: %s\n", normalizedASN)
 
-	// Get CIDR ranges from ASN
-	fmt.Println("    [*] Discovering CIDR ranges...")
-	args := []string{"-a", normalizedASN, "-silent"}
-	r := exec.Run("asnmap", args, &exec.Options{Timeout: 2 * time.Minute})
-	if r.Error != nil {
-		return nil, fmt.Errorf("asnmap failed: %v", r.Error)
+	var cidrs []string
+	var source string
+
+	// Try asnmap first if installed
+	if d.c.IsInstalled("asnmap") {
+		fmt.Println("    [*] Discovering CIDR ranges via asnmap...")
+		args := []string{"-a", normalizedASN, "-silent"}
+		r := exec.Run("asnmap", args, &exec.Options{Timeout: 2 * time.Minute})
+		if r.Error == nil && r.Stdout != "" {
+			cidrs = exec.Lines(r.Stdout)
+			source = "asnmap"
+		}
 	}
 
-	cidrs := exec.Lines(r.Stdout)
-	result.Sources["asnmap_cidrs"] = len(cidrs)
-	fmt.Printf("        asnmap: %d CIDR ranges\n", len(cidrs))
+	// Fallback to free APIs if asnmap failed or not installed
+	if len(cidrs) == 0 {
+		fmt.Println("    [*] Using free API fallbacks (no asnmap or failed)...")
+
+		// Try RIPEstat API (free, no API key)
+		if len(cidrs) == 0 {
+			fmt.Println("        Trying RIPEstat API...")
+			cidrs, _ = fetchASNPrefixesFromRIPEstat(asnNumber)
+			if len(cidrs) > 0 {
+				source = "ripestat"
+			}
+		}
+
+		// Try HackerTarget API (free, 50/day limit)
+		if len(cidrs) == 0 {
+			fmt.Println("        Trying HackerTarget API...")
+			cidrs, _ = fetchASNPrefixesFromHackerTarget(normalizedASN)
+			if len(cidrs) > 0 {
+				source = "hackertarget"
+			}
+		}
+
+		// Try BGPView API (free)
+		if len(cidrs) == 0 {
+			fmt.Println("        Trying BGPView API...")
+			cidrs, _ = fetchASNPrefixesFromBGPView(asnNumber)
+			if len(cidrs) > 0 {
+				source = "bgpview"
+			}
+		}
+	}
+
+	if len(cidrs) == 0 {
+		result.Duration = time.Since(start)
+		return result, fmt.Errorf("no CIDR ranges found for %s (all sources failed)", normalizedASN)
+	}
+
+	result.Sources[source+"_cidrs"] = len(cidrs)
+	fmt.Printf("        %s: %d CIDR ranges\n", source, len(cidrs))
 
 	if len(cidrs) == 0 {
 		result.Duration = time.Since(start)
@@ -162,26 +206,19 @@ func (d *Discoverer) discoverDomainsFromIPs(ips []string) (*Result, error) {
 
 	// Run discovery tools in parallel
 	discoveryTools := []struct {
-		name string
-		fn   func([]string) []string
+		name    string
+		fn      func([]string) []string
+		toolCmd string // command to check for installation
 	}{
-		{"hakrevdns", d.hakrevdns},
-		{"hakip2host", d.hakip2host},
-		{"cero", d.cero},
-		{"dnsx_ptr", d.dnsxPTR},
+		{"hakrevdns", d.hakrevdns, "hakrevdns"},
+		{"hakip2host", d.hakip2host, "hakip2host"},
+		{"cero", d.cero, "cero"},
+		{"CloudRecon", d.cloudRecon, "CloudRecon"},
+		{"dnsx_ptr", d.dnsxPTR, "dnsx"},
 	}
 
 	for _, t := range discoveryTools {
-		if t.name == "hakrevdns" && !d.c.IsInstalled("hakrevdns") {
-			continue
-		}
-		if t.name == "hakip2host" && !d.c.IsInstalled("hakip2host") {
-			continue
-		}
-		if t.name == "cero" && !d.c.IsInstalled("cero") {
-			continue
-		}
-		if t.name == "dnsx_ptr" && !d.c.IsInstalled("dnsx") {
+		if !d.c.IsInstalled(t.toolCmd) {
 			continue
 		}
 
@@ -241,26 +278,19 @@ func (d *Discoverer) Discover(target string) (*Result, error) {
 
 	// Run discovery tools in parallel
 	discoveryTools := []struct {
-		name string
-		fn   func([]string) []string
+		name    string
+		fn      func([]string) []string
+		toolCmd string // command to check for installation
 	}{
-		{"hakrevdns", d.hakrevdns},
-		{"hakip2host", d.hakip2host},
-		{"cero", d.cero},
-		{"dnsx_ptr", d.dnsxPTR},
+		{"hakrevdns", d.hakrevdns, "hakrevdns"},
+		{"hakip2host", d.hakip2host, "hakip2host"},
+		{"cero", d.cero, "cero"},
+		{"CloudRecon", d.cloudRecon, "CloudRecon"},
+		{"dnsx_ptr", d.dnsxPTR, "dnsx"},
 	}
 
 	for _, t := range discoveryTools {
-		if t.name == "hakrevdns" && !d.c.IsInstalled("hakrevdns") {
-			continue
-		}
-		if t.name == "hakip2host" && !d.c.IsInstalled("hakip2host") {
-			continue
-		}
-		if t.name == "cero" && !d.c.IsInstalled("cero") {
-			continue
-		}
-		if t.name == "dnsx_ptr" && !d.c.IsInstalled("dnsx") {
+		if !d.c.IsInstalled(t.toolCmd) {
 			continue
 		}
 
@@ -431,6 +461,86 @@ func parseHakip2hostOutput(output string) []string {
 			}
 		}
 	}
+	return domains
+}
+
+// cloudRecon uses CloudRecon for SSL certificate reconnaissance
+// CloudRecon scans IPs for SSL certificates and extracts CNs/SANs
+func (d *Discoverer) cloudRecon(ips []string) []string {
+	if !d.c.IsInstalled("CloudRecon") {
+		return nil
+	}
+
+	// Use temp file for input
+	input := strings.Join(ips, "\n")
+	tmpFile, cleanup, err := exec.TempFile(input, "-ips.txt")
+	if err != nil {
+		return nil
+	}
+	defer cleanup()
+
+	// CloudRecon scrape mode: CloudRecon scrape -i file.txt -j
+	args := []string{"scrape", "-i", tmpFile, "-j"}
+
+	// Add concurrency based on config
+	if d.cfg.Threads > 0 {
+		args = append(args, "-c", fmt.Sprintf("%d", d.cfg.Threads))
+	}
+
+	// Add custom ports if scanning web services
+	args = append(args, "-p", "443,8443,8080,9443")
+
+	// Timeout for TLS connections
+	args = append(args, "-t", "5")
+
+	r := exec.Run("CloudRecon", args, &exec.Options{Timeout: 5 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+
+	return parseCloudReconOutput(r.Stdout)
+}
+
+// parseCloudReconOutput parses JSON output from CloudRecon
+// Format: {"ip":"1.2.3.4","port":443,"org":"Example Inc","cn":"example.com","san":["www.example.com","api.example.com"]}
+func parseCloudReconOutput(output string) []string {
+	seen := make(map[string]bool)
+	var domains []string
+
+	for _, line := range exec.Lines(output) {
+		if line == "" {
+			continue
+		}
+
+		// Parse JSON line
+		var result struct {
+			IP   string   `json:"ip"`
+			Port int      `json:"port"`
+			Org  string   `json:"org"`
+			CN   string   `json:"cn"`
+			SAN  []string `json:"san"`
+		}
+
+		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			continue
+		}
+
+		// Extract CN
+		if result.CN != "" && !seen[result.CN] && isValidDomain(result.CN) {
+			seen[result.CN] = true
+			domains = append(domains, result.CN)
+		}
+
+		// Extract SANs
+		for _, san := range result.SAN {
+			san = strings.TrimPrefix(san, "*.")
+			if san != "" && !seen[san] && isValidDomain(san) {
+				seen[san] = true
+				domains = append(domains, san)
+			}
+		}
+	}
+
 	return domains
 }
 
@@ -658,4 +768,204 @@ func extractBaseDomain(domain string) string {
 
 	// Standard TLD (last two parts)
 	return parts[len(parts)-2] + "." + parts[len(parts)-1]
+}
+
+// ============================================================================
+// Free ASN Lookup APIs (no API key required)
+// ============================================================================
+
+// fetchASNPrefixesFromRIPEstat fetches IP prefixes from RIPEstat API (free, no limit)
+// API docs: https://stat.ripe.net/docs/data_api
+func fetchASNPrefixesFromRIPEstat(asnNumber string) ([]string, error) {
+	url := fmt.Sprintf("https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS%s", asnNumber)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("RIPEstat API returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse RIPEstat response
+	var result struct {
+		Data struct {
+			Prefixes []struct {
+				Prefix string `json:"prefix"`
+			} `json:"prefixes"`
+		} `json:"data"`
+		Status string `json:"status"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	if result.Status != "ok" {
+		return nil, fmt.Errorf("RIPEstat status: %s", result.Status)
+	}
+
+	var prefixes []string
+	for _, p := range result.Data.Prefixes {
+		if p.Prefix != "" {
+			prefixes = append(prefixes, p.Prefix)
+		}
+	}
+
+	return prefixes, nil
+}
+
+// fetchASNPrefixesFromHackerTarget fetches IP prefixes from HackerTarget API (free, 50/day)
+// API docs: https://hackertarget.com/as-ip-lookup/
+func fetchASNPrefixesFromHackerTarget(asn string) ([]string, error) {
+	url := fmt.Sprintf("https://api.hackertarget.com/aslookup/?q=%s", asn)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HackerTarget API returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for error response
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, "error") || strings.Contains(bodyStr, "API count exceeded") {
+		return nil, fmt.Errorf("HackerTarget: %s", bodyStr)
+	}
+
+	// Parse line-by-line response (format: "IP/CIDR, ASN, Description")
+	var prefixes []string
+	for _, line := range strings.Split(bodyStr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Extract CIDR from first field
+		parts := strings.Split(line, ",")
+		if len(parts) > 0 {
+			cidr := strings.TrimSpace(parts[0])
+			// Validate it's a CIDR
+			if strings.Contains(cidr, "/") {
+				prefixes = append(prefixes, cidr)
+			}
+		}
+	}
+
+	return prefixes, nil
+}
+
+// fetchASNPrefixesFromBGPView fetches IP prefixes from BGPView API (free)
+// API docs: https://bgpview.io/
+func fetchASNPrefixesFromBGPView(asnNumber string) ([]string, error) {
+	url := fmt.Sprintf("https://api.bgpview.io/asn/%s/prefixes", asnNumber)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Reconator/1.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("BGPView API returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse BGPView response
+	var result struct {
+		Data struct {
+			IPv4Prefixes []struct {
+				Prefix string `json:"prefix"`
+			} `json:"ipv4_prefixes"`
+			IPv6Prefixes []struct {
+				Prefix string `json:"prefix"`
+			} `json:"ipv6_prefixes"`
+		} `json:"data"`
+		Status string `json:"status"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	if result.Status != "ok" {
+		return nil, fmt.Errorf("BGPView status: %s", result.Status)
+	}
+
+	var prefixes []string
+	for _, p := range result.Data.IPv4Prefixes {
+		if p.Prefix != "" {
+			prefixes = append(prefixes, p.Prefix)
+		}
+	}
+	// Optionally include IPv6
+	for _, p := range result.Data.IPv6Prefixes {
+		if p.Prefix != "" {
+			prefixes = append(prefixes, p.Prefix)
+		}
+	}
+
+	return prefixes, nil
+}
+
+// LookupASNForIP finds the ASN for an IP address using free APIs
+func LookupASNForIP(ip string) (string, string, error) {
+	// Try RIPEstat first
+	url := fmt.Sprintf("https://stat.ripe.net/data/network-info/data.json?resource=%s", ip)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", err
+	}
+
+	var result struct {
+		Data struct {
+			ASNs   []string `json:"asns"`
+			Prefix string   `json:"prefix"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", "", err
+	}
+
+	if len(result.Data.ASNs) > 0 {
+		return result.Data.ASNs[0], result.Data.Prefix, nil
+	}
+
+	return "", "", fmt.Errorf("no ASN found for %s", ip)
 }

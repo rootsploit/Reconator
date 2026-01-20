@@ -142,26 +142,19 @@ func (pm *ProviderManager) addProvider(name ProviderType, keys []string, endpoin
 }
 
 // setupFallbackChain sets up automatic fallback between providers
+// Uses the order from config file - each provider falls back to the next one in the list
 func (pm *ProviderManager) setupFallbackChain() {
-	// Default fallback chain: OpenAI -> Groq -> Claude -> Gemini -> DeepSeek -> Ollama
-	fallbackOrder := []ProviderType{ProviderOpenAI, ProviderGroq, ProviderClaude, ProviderGemini, ProviderDeepSeek, ProviderOllama}
-
 	for i := range pm.config.Providers {
 		provider := &pm.config.Providers[i]
 		if provider.Fallback != "" {
-			continue // Already configured
+			continue // Already configured manually
 		}
 
-		// Find next available provider in the chain
-		for j, fb := range fallbackOrder {
-			if fb == provider.Name {
-				// Find next available
-				for k := j + 1; k < len(fallbackOrder); k++ {
-					if pm.HasProvider(fallbackOrder[k]) {
-						provider.Fallback = fallbackOrder[k]
-						break
-					}
-				}
+		// Find next available provider in config order
+		for j := i + 1; j < len(pm.config.Providers); j++ {
+			nextProvider := &pm.config.Providers[j]
+			if hasValidKeys(*nextProvider) || nextProvider.Name == ProviderOllama {
+				provider.Fallback = nextProvider.Name
 				break
 			}
 		}
@@ -1174,74 +1167,64 @@ func CreateDefaultConfigFile() error {
 	template := `# Reconator AI Configuration
 # Add your API keys here for AI-powered features
 # Multiple keys per provider are supported (for key rotation on rate limits)
+# Fallback order: ollama -> openai -> claude -> gemini -> deepseek -> groq
 
 providers:
-  # OpenAI (GPT-4o-mini, GPT-4)
+  # Ollama (local, free, private) - FIRST CHOICE if running
+  # Install: https://ollama.ai
+  # No API key needed, just run: ollama serve && ollama pull llama3.2
+  - name: ollama
+    endpoint: http://localhost:11434
+    model: llama3.2
+    # model: qwen2.5:32b  # Better for complex analysis
+
+  # OpenAI (GPT-4o-mini) - Most reliable cloud option
   # Get key at: https://platform.openai.com/api-keys
   - name: openai
     keys:
       - "sk-your-openai-key-here"
-      # - "sk-second-key-for-rotation"
     model: gpt-4o-mini
     rpm_limit: 60
-    fallback: groq
 
-  # Groq (Llama 3.1, Mixtral) - Fast & Free tier available
-  # Get key at: https://console.groq.com/keys
-  - name: groq
-    keys:
-      - "gsk-your-groq-key-here"
-    model: llama-3.1-70b-versatile
-    rpm_limit: 30
-    fallback: claude
-
-  # Anthropic Claude (Claude Sonnet)
+  # Anthropic Claude - Best quality for security analysis
   # Get key at: https://console.anthropic.com/
   - name: claude
     keys:
       - "sk-ant-your-claude-key-here"
     model: claude-sonnet-4-20250514
     rpm_limit: 50
-    fallback: gemini
 
   # Google Gemini
-  # Get key at: https://makersuite.google.com/app/apikey
+  # Get key at: https://aistudio.google.com/app/apikey
   - name: gemini
     keys:
       - "your-gemini-key-here"
     model: gemini-1.5-flash
     rpm_limit: 60
-    fallback: deepseek
 
-  # DeepSeek (affordable alternative)
+  # DeepSeek - Affordable alternative
   # Get key at: https://platform.deepseek.com/
   - name: deepseek
     keys:
       - "sk-your-deepseek-key-here"
     model: deepseek-chat
     rpm_limit: 60
-    fallback: ollama
 
-  # Ollama (local, free, private)
-  # Install: https://ollama.ai
-  # No API key needed, just run: ollama serve
-  - name: ollama
-    endpoint: http://localhost:11434
-    model: llama3.2
-    # model: qwen2.5:32b  # Better for complex analysis
-    # model: codellama    # Good for code-related tasks
+  # Groq - Fast inference, generous free tier
+  # Get key at: https://console.groq.com/keys
+  - name: groq
+    keys:
+      - "gsk-your-groq-key-here"
+    model: llama-3.1-70b-versatile
+    rpm_limit: 30
 
-# Default provider to try first (uses fallback chain if unavailable)
-default_provider: openai
-
-# Alternative: Set via environment variables (comma-separated for multiple keys)
-# OPENAI_API_KEY=sk-key1,sk-key2
+# Alternative: Set via environment variables
+# OLLAMA_HOST=http://localhost:11434
+# OPENAI_API_KEY=sk-key1
 # ANTHROPIC_API_KEY=sk-ant-key1
 # GEMINI_API_KEY=key1
-# GROQ_API_KEY=gsk-key1
 # DEEPSEEK_API_KEY=sk-key1
-# OLLAMA_HOST=http://localhost:11434
-# OLLAMA_MODEL=llama3.2
+# GROQ_API_KEY=gsk-key1
 `
 
 	return os.WriteFile(path, []byte(template), 0600)

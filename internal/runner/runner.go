@@ -300,6 +300,48 @@ func (r *Runner) process(target string) error {
 		fmt.Println()
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════
+	// Screenshots (run early, right after we have live hosts and ports)
+	// This runs in parallel with katana crawl for efficiency
+	// ═══════════════════════════════════════════════════════════════════════
+	var screenshotRes *screenshot.Result
+	var screenshotWg sync.WaitGroup
+	var screenshotMu sync.Mutex
+
+	if r.cfg.EnableScreenshots && !r.cfg.PassiveMode && len(alive) > 0 {
+		screenshotWg.Add(1)
+		go func() {
+			defer screenshotWg.Done()
+			cyan.Println("[Visual Recon] Screenshots (parallel with crawl)")
+			fmt.Println("───────────────────────────────────────────────────")
+			sc := screenshot.NewCapturer(r.cfg, r.c)
+
+			var res *screenshot.Result
+			var err error
+
+			// Use port-aware capture if we have portscan results
+			if portsRes != nil && len(portsRes.OpenPorts) > 0 {
+				res, err = sc.CaptureWithPorts(alive, portsRes.OpenPorts, r.cfg.OutputDir)
+			} else {
+				res, err = sc.CaptureWithResult(alive)
+			}
+
+			if err != nil {
+				yellow.Printf("    ⚠ Screenshot capture failed: %v\n", err)
+			} else if res != nil && !res.Skipped {
+				green.Printf("    Captured: %d screenshots\n", res.TotalCaptures)
+				if len(res.Clusters) > 0 {
+					green.Printf("    Clusters: %d groups found\n", len(res.Clusters))
+				}
+				screenshotMu.Lock()
+				screenshotRes = res
+				screenshotMu.Unlock()
+				r.out.SaveScreenshotResults(res)
+			}
+			fmt.Println()
+		}()
+	}
+
 	// Run katana now that we have alive hosts (part of historic phase)
 	if historicRes != nil && !r.cfg.PassiveMode && len(alive) > 0 {
 		hc := historic.NewCollector(r.cfg, r.c)
@@ -450,30 +492,8 @@ func (r *Runner) process(target string) error {
 		fmt.Println()
 	}
 
-	// ═══════════════════════════════════════════════════════════════════════
-	// Phase 9: Visual Recon - Screenshots with clustering
-	// ═══════════════════════════════════════════════════════════════════════
-	if r.cfg.EnableScreenshots && !r.cfg.PassiveMode && len(alive) > 0 {
-		cyan.Println("[Phase 9] Visual Recon (Screenshots)")
-		fmt.Println("───────────────────────────────────────────────────")
-		sc := screenshot.NewCapturer(r.cfg, r.c)
-		res, err := sc.CaptureWithResult(alive)
-		if err != nil {
-			yellow.Printf("    ⚠ Screenshot capture failed: %v\n", err)
-		} else {
-			green.Printf("    Captured: %d screenshots\n", res.TotalCaptures)
-			if len(res.Clusters) > 0 {
-				green.Printf("    Clusters: %d groups found\n", len(res.Clusters))
-				for _, cluster := range res.Clusters {
-					if cluster.Count >= 3 {
-						green.Printf("        %s: %d pages\n", cluster.Name, cluster.Count)
-					}
-				}
-			}
-			r.out.SaveScreenshotResults(res)
-		}
-		fmt.Println()
-	}
+	// Wait for screenshot capture to complete (started in parallel earlier)
+	screenshotWg.Wait()
 
 	// ═══════════════════════════════════════════════════════════════════════
 	// Phase 10: AI-Guided Scanning (final analysis phase)
@@ -565,20 +585,21 @@ func (r *Runner) process(target string) error {
 	// Generate HTML Report
 	if r.cfg.GenerateReport {
 		reportData := &report.Data{
-			Target:    target,
-			Version:   version.Version,
-			Date:      time.Now().Format(time.RFC1123),
-			Duration:  time.Since(start).Round(time.Second).String(),
-			Subdomain: subRes,
-			WAF:       wafRes,
-			Ports:     portsRes,
-			Takeover:  takeoverRes,
-			Historic:  historicRes,
-			Tech:      techRes,
-			DirBrute:  dirRes,
-			VulnScan:  vulnRes,
-			AIGuided:  aiRes,
-			OSINT:     osintRes,
+			Target:     target,
+			Version:    version.Version,
+			Date:       time.Now().Format(time.RFC1123),
+			Duration:   time.Since(start).Round(time.Second).String(),
+			Subdomain:  subRes,
+			WAF:        wafRes,
+			Ports:      portsRes,
+			Takeover:   takeoverRes,
+			Historic:   historicRes,
+			Tech:       techRes,
+			DirBrute:   dirRes,
+			VulnScan:   vulnRes,
+			AIGuided:   aiRes,
+			OSINT:      osintRes,
+			Screenshot: screenshotRes,
 		}
 
 		if err := report.Generate(reportData, outDir); err != nil {

@@ -27,16 +27,22 @@ type Service struct {
 	Title      string `json:"title,omitempty"`
 	StatusCode int    `json:"status_code,omitempty"`
 	Tech       string `json:"tech,omitempty"`
+	IP         string `json:"ip,omitempty"`
+	ASN        string `json:"asn,omitempty"`
+	WebServer  string `json:"web_server,omitempty"`
 }
 
 type TLSData struct {
-	Host    string   `json:"host"`
-	Port    int      `json:"port"`
-	Version string   `json:"version,omitempty"`
-	Cipher  string   `json:"cipher,omitempty"`
-	Subject string   `json:"subject,omitempty"`
-	Issuer  string   `json:"issuer,omitempty"`
-	SANs    []string `json:"sans,omitempty"`
+	Host      string   `json:"host"`
+	Port      int      `json:"port"`
+	Version   string   `json:"version,omitempty"`
+	Cipher    string   `json:"cipher,omitempty"`
+	Subject   string   `json:"subject,omitempty"`
+	Issuer    string   `json:"issuer,omitempty"`
+	SANs      []string `json:"sans,omitempty"`
+	NotBefore string   `json:"not_before,omitempty"`
+	NotAfter  string   `json:"not_after,omitempty"`
+	DaysLeft  int      `json:"days_left,omitempty"`
 }
 
 type Scanner struct {
@@ -183,7 +189,8 @@ func (s *Scanner) naabu(input string) (map[string][]int, []string) {
 func (s *Scanner) httpx(input string) ([]string, map[string][]Service) {
 	var alive []string
 	svcs := make(map[string][]Service)
-	args := []string{"-l", input, "-silent", "-follow-redirects", "-status-code", "-title", "-tech-detect", "-json"}
+	// Enhanced httpx flags: IP, ASN, web-server for richer data
+	args := []string{"-l", input, "-silent", "-follow-redirects", "-status-code", "-title", "-tech-detect", "-ip", "-asn", "-web-server", "-json"}
 	if s.cfg.Threads > 0 {
 		args = append(args, "-threads", fmt.Sprintf("%d", s.cfg.Threads))
 	}
@@ -209,6 +216,9 @@ func (s *Scanner) httpx(input string) ([]string, map[string][]Service) {
 			StatusCode int      `json:"status_code"`
 			Title      string   `json:"title"`
 			Tech       []string `json:"tech"`
+			IP         string   `json:"a"`          // IP address (A record)
+			ASN        string   `json:"asn"`        // ASN info (AS12345, Cloudflare)
+			WebServer  string   `json:"webserver"`  // Web server header
 		}
 		if json.Unmarshal([]byte(line), &e) != nil || e.URL == "" || seen[e.URL] {
 			continue
@@ -221,7 +231,15 @@ func (s *Scanner) httpx(input string) ([]string, map[string][]Service) {
 		}
 		port := 0
 		fmt.Sscanf(e.Port, "%d", &port)
-		svcs[h] = append(svcs[h], Service{Port: port, Title: e.Title, StatusCode: e.StatusCode, Tech: strings.Join(e.Tech, ",")})
+		svcs[h] = append(svcs[h], Service{
+			Port:       port,
+			Title:      e.Title,
+			StatusCode: e.StatusCode,
+			Tech:       strings.Join(e.Tech, ","),
+			IP:         e.IP,
+			ASN:        e.ASN,
+			WebServer:  e.WebServer,
+		})
 	}
 	return alive, svcs
 }
@@ -229,7 +247,8 @@ func (s *Scanner) httpx(input string) ([]string, map[string][]Service) {
 func (s *Scanner) tlsx(input string) map[string]TLSData {
 	tls := make(map[string]TLSData)
 	// tlsx needs port specification - scan common TLS ports
-	args := []string{"-l", input, "-p", "443,8443,9443,4443", "-silent", "-json"}
+	// Added -expired flag to check expiry info
+	args := []string{"-l", input, "-p", "443,8443,9443,4443", "-silent", "-json", "-so", "-ve"}
 	if s.cfg.Threads > 0 {
 		args = append(args, "-c", fmt.Sprintf("%d", s.cfg.Threads))
 	}
@@ -239,18 +258,41 @@ func (s *Scanner) tlsx(input string) map[string]TLSData {
 	}
 	for _, line := range exec.Lines(r.Stdout) {
 		var e struct {
-			Host    string   `json:"host"`
-			Port    int      `json:"port"`
-			Version string   `json:"version"`
-			Cipher  string   `json:"cipher"`
-			Subject string   `json:"subject_cn"`
-			Issuer  string   `json:"issuer_cn"`
-			SANs    []string `json:"san"`
+			Host      string   `json:"host"`
+			Port      int      `json:"port"`
+			Version   string   `json:"version"`
+			Cipher    string   `json:"cipher"`
+			Subject   string   `json:"subject_cn"`
+			Issuer    string   `json:"issuer_cn"`
+			SANs      []string `json:"san"`
+			NotBefore string   `json:"not_before"`
+			NotAfter  string   `json:"not_after"`
+			Expired   bool     `json:"expired"`
 		}
 		if json.Unmarshal([]byte(line), &e) != nil || e.Host == "" {
 			continue
 		}
-		tls[e.Host] = TLSData{Host: e.Host, Port: e.Port, Version: e.Version, Cipher: e.Cipher, Subject: e.Subject, Issuer: e.Issuer, SANs: e.SANs}
+		// Calculate days left until expiry
+		daysLeft := 0
+		if e.NotAfter != "" {
+			if t, err := time.Parse("2006-01-02 15:04:05 -0700 MST", e.NotAfter); err == nil {
+				daysLeft = int(time.Until(t).Hours() / 24)
+			} else if t, err := time.Parse(time.RFC3339, e.NotAfter); err == nil {
+				daysLeft = int(time.Until(t).Hours() / 24)
+			}
+		}
+		tls[e.Host] = TLSData{
+			Host:      e.Host,
+			Port:      e.Port,
+			Version:   e.Version,
+			Cipher:    e.Cipher,
+			Subject:   e.Subject,
+			Issuer:    e.Issuer,
+			SANs:      e.SANs,
+			NotBefore: e.NotBefore,
+			NotAfter:  e.NotAfter,
+			DaysLeft:  daysLeft,
+		}
 	}
 	return tls
 }

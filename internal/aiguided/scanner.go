@@ -17,14 +17,15 @@ import (
 )
 
 type Result struct {
-	TargetSummary        string          `json:"target_summary"`
-	CVEsFromTech         []CVEInfo       `json:"cves_from_tech,omitempty"`
-	RecommendedTags      []string        `json:"recommended_tags"`
-	RecommendedTemplates []string        `json:"recommended_templates"`
-	AIProvider           string          `json:"ai_provider"`
-	Vulnerabilities      []Vulnerability `json:"vulnerabilities"`
-	ChainAnalysis        *ChainAnalysis  `json:"chain_analysis,omitempty"`
-	Duration             time.Duration   `json:"duration"`
+	TargetSummary        string            `json:"target_summary"`
+	CVEsFromTech         []CVEInfo         `json:"cves_from_tech,omitempty"`
+	RecommendedTags      []string          `json:"recommended_tags"`
+	RecommendedTemplates []string          `json:"recommended_templates"`
+	AIProvider           string            `json:"ai_provider"`
+	Vulnerabilities      []Vulnerability   `json:"vulnerabilities"`
+	ChainAnalysis        *ChainAnalysis    `json:"chain_analysis,omitempty"`
+	ExecutiveSummary     *ExecutiveSummary `json:"executive_summary,omitempty"`
+	Duration             time.Duration     `json:"duration"`
 }
 
 type CVEInfo struct {

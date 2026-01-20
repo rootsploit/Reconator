@@ -344,36 +344,56 @@ func determineClusterName(screenshots []ScreenshotMeta, members []int) string {
 
 // parseGoWitnessFilename extracts URL and host from gowitness filename
 func parseGoWitnessFilename(filePath string) (url, host string) {
-	// gowitness saves files as: https-example.com-443.png or similar
+	// gowitness v3 saves files as: http---example.com-80.jpeg or https---example.com-443.jpeg
+	// Note: scheme is separated by "---" (triple dash), port by single "-"
 	base := filepath.Base(filePath)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
 
-	// Try to reconstruct URL
-	parts := strings.Split(base, "-")
-	if len(parts) >= 2 {
-		scheme := parts[0]
-		if scheme == "https" || scheme == "http" {
-			// Join remaining parts as host (handle hosts with dashes)
-			host = strings.Join(parts[1:len(parts)-1], "-")
-			if len(parts) > 2 {
-				port := parts[len(parts)-1]
-				if port == "443" {
-					url = fmt.Sprintf("https://%s", host)
-				} else if port == "80" {
-					url = fmt.Sprintf("http://%s", host)
+	// gowitness v3 uses "---" to separate scheme from host
+	if strings.Contains(base, "---") {
+		parts := strings.SplitN(base, "---", 2)
+		if len(parts) == 2 {
+			scheme := parts[0]
+			hostPort := parts[1]
+
+			// Find the last dash which separates host from port
+			lastDash := strings.LastIndex(hostPort, "-")
+			if lastDash > 0 {
+				host = hostPort[:lastDash]
+				port := hostPort[lastDash+1:]
+
+				// Construct clean URL
+				if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+					url = fmt.Sprintf("%s://%s", scheme, host)
 				} else {
 					url = fmt.Sprintf("%s://%s:%s", scheme, host, port)
 				}
+				return url, host
 			}
 		}
 	}
 
-	if url == "" {
-		url = base
-		host = base
+	// Fallback for gowitness v2 or other formats: scheme-host-port
+	parts := strings.Split(base, "-")
+	if len(parts) >= 3 {
+		scheme := parts[0]
+		if scheme == "https" || scheme == "http" {
+			// Port is the last part
+			port := parts[len(parts)-1]
+			// Host is everything between scheme and port
+			host = strings.Join(parts[1:len(parts)-1], "-")
+
+			if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+				url = fmt.Sprintf("%s://%s", scheme, host)
+			} else {
+				url = fmt.Sprintf("%s://%s:%s", scheme, host, port)
+			}
+			return url, host
+		}
 	}
 
-	return url, host
+	// Fallback: use base as both
+	return base, base
 }
 
 // isImageFile checks if a file is a supported image format
