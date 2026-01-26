@@ -1,6 +1,7 @@
 package dirbrute
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -41,6 +42,11 @@ func NewScanner(cfg *config.Config, checker *tools.Checker) *Scanner {
 
 // Scan performs directory bruteforce on alive hosts
 func (s *Scanner) Scan(hosts []string) (*Result, error) {
+	return s.ScanWithContext(context.Background(), hosts)
+}
+
+// ScanWithContext performs directory bruteforce with context support
+func (s *Scanner) ScanWithContext(ctx context.Context, hosts []string) (*Result, error) {
 	start := time.Now()
 	result := &Result{
 		TotalHosts:   len(hosts),
@@ -51,6 +57,13 @@ func (s *Scanner) Scan(hosts []string) (*Result, error) {
 
 	if len(hosts) == 0 {
 		return result, nil
+	}
+
+	// CRITICAL: Limit hosts to prevent forever scans
+	maxHosts := 20
+	if len(hosts) > maxHosts {
+		fmt.Printf("        [DirBrute] Limiting from %d to %d hosts\n", len(hosts), maxHosts)
+		hosts = hosts[:maxHosts]
 	}
 
 	// Find wordlist
@@ -76,8 +89,13 @@ func (s *Scanner) Scan(hosts []string) (*Result, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			fmt.Println("        Running feroxbuster...")
-			discoveries := s.feroxbuster(tmp, wordlist)
+			discoveries := s.feroxbusterWithContext(ctx, tmp, wordlist)
 			mu.Lock()
 			result.Discoveries = append(result.Discoveries, discoveries...)
 			mu.Unlock()
@@ -90,8 +108,13 @@ func (s *Scanner) Scan(hosts []string) (*Result, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			fmt.Println("        Running ffuf...")
-			discoveries := s.ffuf(hosts, wordlist)
+			discoveries := s.ffufWithContext(ctx, hosts, wordlist)
 			mu.Lock()
 			result.Discoveries = append(result.Discoveries, discoveries...)
 			mu.Unlock()
@@ -124,7 +147,19 @@ func (s *Scanner) Scan(hosts []string) (*Result, error) {
 
 // feroxbuster runs feroxbuster for directory bruteforce
 func (s *Scanner) feroxbuster(hostsFile, wordlist string) []Discovery {
+	return s.feroxbusterWithContext(context.Background(), hostsFile, wordlist)
+}
+
+// feroxbusterWithContext runs feroxbuster with context support
+func (s *Scanner) feroxbusterWithContext(ctx context.Context, hostsFile, wordlist string) []Discovery {
 	var discoveries []Discovery
+
+	// Check context
+	select {
+	case <-ctx.Done():
+		return discoveries
+	default:
+	}
 
 	// Create output file
 	outFile, err := os.CreateTemp("", "ferox-*.json")
@@ -146,12 +181,13 @@ func (s *Scanner) feroxbuster(hostsFile, wordlist string) []Discovery {
 		"--no-state",
 		"-o", outPath,
 		"--json",
+		"--time-limit", "10m", // Add time limit to feroxbuster itself
 	}
 
 	if s.cfg.Threads > 0 {
 		args = append(args, "-t", fmt.Sprintf("%d", s.cfg.Threads))
 	} else {
-		args = append(args, "-t", "50")
+		args = append(args, "-t", "50") // Restored to 50 for throughput
 	}
 
 	if s.cfg.RateLimit > 0 {
@@ -164,7 +200,8 @@ func (s *Scanner) feroxbuster(hostsFile, wordlist string) []Discovery {
 		return discoveries
 	}
 
-	r := exec.RunWithInput("feroxbuster", args, string(hostsContent), &exec.Options{Timeout: 30 * time.Minute})
+	// Reduced timeout from 15 to 12 minutes
+	r := exec.RunWithInputAndContext(ctx, "feroxbuster", args, string(hostsContent), &exec.Options{Timeout: 12 * time.Minute})
 	if r.Error != nil {
 		// Still try to parse output file
 	}
@@ -199,69 +236,107 @@ func (s *Scanner) feroxbuster(hostsFile, wordlist string) []Discovery {
 
 // ffuf runs ffuf for directory bruteforce
 func (s *Scanner) ffuf(hosts []string, wordlist string) []Discovery {
+	return s.ffufWithContext(context.Background(), hosts, wordlist)
+}
+
+// ffufWithContext runs ffuf with context support and parallel execution
+func (s *Scanner) ffufWithContext(ctx context.Context, hosts []string, wordlist string) []Discovery {
 	var discoveries []Discovery
+	var mu sync.Mutex
 
-	for _, host := range hosts {
-		// Limit to first 10 hosts to avoid long scan times
-		if len(discoveries) > 1000 {
-			break
-		}
-
-		// Create output file
-		outFile, err := os.CreateTemp("", "ffuf-*.json")
-		if err != nil {
-			continue
-		}
-		outPath := outFile.Name()
-		outFile.Close()
-
-		// ffuf -w wordlist -u host/FUZZ -mc 200,301,302,403,401 -o output.json -of json
-		args := []string{
-			"-w", wordlist,
-			"-u", strings.TrimSuffix(host, "/") + "/FUZZ",
-			"-mc", "200,301,302,403,401,500",
-			"-fc", "404",
-			"-o", outPath,
-			"-of", "json",
-			"-s", // silent
-		}
-
-		if s.cfg.Threads > 0 {
-			args = append(args, "-t", fmt.Sprintf("%d", s.cfg.Threads))
-		}
-
-		if s.cfg.RateLimit > 0 {
-			args = append(args, "-rate", fmt.Sprintf("%d", s.cfg.RateLimit))
-		}
-
-		exec.Run("ffuf", args, &exec.Options{Timeout: 10 * time.Minute})
-
-		// Parse JSON output
-		content, err := os.ReadFile(outPath)
-		os.Remove(outPath)
-		if err != nil {
-			continue
-		}
-
-		var ffufResult struct {
-			Results []struct {
-				URL    string `json:"url"`
-				Status int    `json:"status"`
-				Length int    `json:"length"`
-			} `json:"results"`
-		}
-		if json.Unmarshal(content, &ffufResult) == nil {
-			for _, r := range ffufResult.Results {
-				discoveries = append(discoveries, Discovery{
-					URL:           r.URL,
-					StatusCode:    r.Status,
-					ContentLength: r.Length,
-					Tool:          "ffuf",
-				})
-			}
-		}
+	// CRITICAL: Limit hosts to prevent forever scans
+	maxHosts := 10
+	if len(hosts) > maxHosts {
+		fmt.Printf("        [ffuf] Limiting from %d to %d hosts\n", len(hosts), maxHosts)
+		hosts = hosts[:maxHosts]
 	}
 
+	// Run ffuf in parallel with limited concurrency
+	maxConcurrent := 3
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+
+	for _, host := range hosts {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			fmt.Printf("        [ffuf] Cancelled, stopping\n")
+			break
+		default:
+		}
+
+		wg.Add(1)
+		sem <- struct{}{} // Acquire
+
+		go func(host string) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release
+
+			// Check context inside goroutine
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			// Create output file
+			outFile, err := os.CreateTemp("", "ffuf-*.json")
+			if err != nil {
+				return
+			}
+			outPath := outFile.Name()
+			outFile.Close()
+			defer os.Remove(outPath)
+
+			// ffuf -w wordlist -u host/FUZZ -mc 200,301,302,403,401 -o output.json -of json
+			args := []string{
+				"-w", wordlist,
+				"-u", strings.TrimSuffix(host, "/") + "/FUZZ",
+				"-mc", "200,301,302,403,401,500",
+				"-fc", "404",
+				"-o", outPath,
+				"-of", "json",
+				"-s",            // silent
+				"-t", "20",      // Limit threads per instance
+				"-timeout", "3", // 3 second request timeout
+			}
+
+			if s.cfg.RateLimit > 0 {
+				args = append(args, "-rate", fmt.Sprintf("%d", s.cfg.RateLimit))
+			}
+
+			// Reduced timeout from 5 to 3 minutes per host
+			exec.RunWithContext(ctx, "ffuf", args, &exec.Options{Timeout: 3 * time.Minute})
+
+			// Parse JSON output
+			content, err := os.ReadFile(outPath)
+			if err != nil {
+				return
+			}
+
+			var ffufResult struct {
+				Results []struct {
+					URL    string `json:"url"`
+					Status int    `json:"status"`
+					Length int    `json:"length"`
+				} `json:"results"`
+			}
+			if json.Unmarshal(content, &ffufResult) == nil {
+				mu.Lock()
+				for _, r := range ffufResult.Results {
+					discoveries = append(discoveries, Discovery{
+						URL:           r.URL,
+						StatusCode:    r.Status,
+						ContentLength: r.Length,
+						Tool:          "ffuf",
+					})
+				}
+				mu.Unlock()
+			}
+		}(host)
+	}
+
+	wg.Wait()
 	return discoveries
 }
 

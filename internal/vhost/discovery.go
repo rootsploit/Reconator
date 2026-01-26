@@ -1,6 +1,7 @@
 package vhost
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -53,7 +54,13 @@ func NewDiscoverer(cfg *config.Config, checker *tools.Checker) *Discoverer {
 }
 
 // Discover performs VHost discovery on the given targets
+// Deprecated: Use DiscoverWithContext instead for proper cancellation support
 func (d *Discoverer) Discover(targets []string, baseDomain string) (*Result, error) {
+	return d.DiscoverWithContext(context.Background(), targets, baseDomain)
+}
+
+// DiscoverWithContext performs VHost discovery with context for cancellation/timeout
+func (d *Discoverer) DiscoverWithContext(ctx context.Context, targets []string, baseDomain string) (*Result, error) {
 	start := time.Now()
 	result := &Result{
 		Target:   baseDomain,
@@ -63,6 +70,13 @@ func (d *Discoverer) Discover(targets []string, baseDomain string) (*Result, err
 
 	if len(targets) == 0 {
 		return result, nil
+	}
+
+	// Check for cancellation early
+	select {
+	case <-ctx.Done():
+		return result, ctx.Err()
+	default:
 	}
 
 	var wg sync.WaitGroup
@@ -75,8 +89,14 @@ func (d *Discoverer) Discover(targets []string, baseDomain string) (*Result, err
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// Check context before starting
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		fmt.Println("        Extracting SANs from TLS certificates...")
-		sans := d.extractCertSANs(targets)
+		sans := d.extractCertSANsWithContext(ctx, targets)
 		mu.Lock()
 		result.CertSANs = sans
 		for _, san := range sans {
@@ -95,8 +115,13 @@ func (d *Discoverer) Discover(targets []string, baseDomain string) (*Result, err
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			fmt.Println("        Running reverse DNS lookups...")
-			rdns := d.reverseDNS(ips)
+			rdns := d.reverseDNSWithContext(ctx, ips)
 			mu.Lock()
 			result.ReverseDNS = rdns
 			for _, name := range rdns {
@@ -116,8 +141,13 @@ func (d *Discoverer) Discover(targets []string, baseDomain string) (*Result, err
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			fmt.Println("        Running VHost fuzzing with ffuf...")
-			vhosts := d.ffufVHostFuzz(ips, baseDomain)
+			vhosts := d.ffufVHostFuzzWithContext(ctx, ips, baseDomain)
 			mu.Lock()
 			result.VHosts = append(result.VHosts, vhosts...)
 			mu.Unlock()
@@ -127,14 +157,22 @@ func (d *Discoverer) Discover(targets []string, baseDomain string) (*Result, err
 
 	wg.Wait()
 
+	// Check for cancellation before post-processing
+	select {
+	case <-ctx.Done():
+		result.Duration = time.Since(start)
+		return result, ctx.Err()
+	default:
+	}
+
 	// Deduplicate and verify VHosts
 	result.VHosts = d.deduplicateVHosts(result.VHosts)
 	result.TotalFound = len(result.VHosts)
 
-	// Verify discovered vhosts
+	// Verify discovered vhosts (with limited concurrency and timeout)
 	if !d.cfg.PassiveMode && len(result.VHosts) > 0 && len(ips) > 0 {
 		fmt.Println("        Verifying discovered vhosts...")
-		result.VHosts = d.verifyVHosts(result.VHosts, ips[0])
+		result.VHosts = d.verifyVHostsWithContext(ctx, result.VHosts, ips[0])
 	}
 
 	result.UniqueVHosts = countVerified(result.VHosts)
@@ -178,25 +216,39 @@ func (d *Discoverer) extractIPs(targets []string) []string {
 
 // extractCertSANs extracts Subject Alternative Names from TLS certificates
 func (d *Discoverer) extractCertSANs(targets []string) []string {
+	return d.extractCertSANsWithContext(context.Background(), targets)
+}
+
+// extractCertSANsWithContext extracts SANs with context support for cancellation
+func (d *Discoverer) extractCertSANsWithContext(ctx context.Context, targets []string) []string {
 	sanSet := make(map[string]bool)
 
 	// Use tlsx if available (faster, handles more edge cases)
 	if d.c.IsInstalled("tlsx") {
-		sans := d.extractSANsWithTLSX(targets)
+		sans := d.extractSANsWithTLSXContext(ctx, targets)
 		for _, san := range sans {
 			sanSet[san] = true
 		}
 	} else {
-		// Fallback to native Go TLS
+		// Fallback to native Go TLS with context-aware dialing
 		for _, target := range targets {
+			// Check for cancellation
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
+
 			host := extractHost(target)
 			port := extractPort(target)
 			if port == "" {
 				port = "443"
 			}
 
+			// Use context-aware dialer
+			dialer := &net.Dialer{Timeout: 5 * time.Second}
 			conn, err := tls.DialWithDialer(
-				&net.Dialer{Timeout: 5 * time.Second},
+				dialer,
 				"tcp",
 				host+":"+port,
 				&tls.Config{InsecureSkipVerify: true},
@@ -232,6 +284,11 @@ func (d *Discoverer) extractCertSANs(targets []string) []string {
 
 // extractSANsWithTLSX uses tlsx for efficient certificate extraction
 func (d *Discoverer) extractSANsWithTLSX(targets []string) []string {
+	return d.extractSANsWithTLSXContext(context.Background(), targets)
+}
+
+// extractSANsWithTLSXContext uses tlsx with context support
+func (d *Discoverer) extractSANsWithTLSXContext(ctx context.Context, targets []string) []string {
 	var sans []string
 
 	tmp, cleanup, err := exec.TempFile(strings.Join(targets, "\n"), "-tlsx-targets.txt")
@@ -251,7 +308,8 @@ func (d *Discoverer) extractSANsWithTLSX(targets []string) []string {
 		args = append(args, "-c", fmt.Sprintf("%d", d.cfg.Threads))
 	}
 
-	r := exec.Run("tlsx", args, &exec.Options{Timeout: 5 * time.Minute})
+	// Use context-aware execution with 3 minute timeout (reduced from 5)
+	r := exec.RunWithContext(ctx, "tlsx", args, &exec.Options{Timeout: 3 * time.Minute})
 	if r.Error != nil {
 		return sans
 	}
@@ -286,27 +344,51 @@ func (d *Discoverer) extractSANsWithTLSX(targets []string) []string {
 
 // reverseDNS performs reverse DNS lookups on IPs
 func (d *Discoverer) reverseDNS(ips []string) []string {
+	return d.reverseDNSWithContext(context.Background(), ips)
+}
+
+// reverseDNSWithContext performs reverse DNS lookups with context support
+func (d *Discoverer) reverseDNSWithContext(ctx context.Context, ips []string) []string {
 	nameSet := make(map[string]bool)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
 	// Use hakrevdns if available (faster, concurrent)
 	if d.c.IsInstalled("hakrevdns") {
-		names := d.reverseDNSWithHakrevdns(ips)
+		names := d.reverseDNSWithHakrevdnsContext(ctx, ips)
 		for _, name := range names {
 			nameSet[name] = true
 		}
 	} else {
-		// Fallback to native Go
+		// Fallback to native Go with per-lookup timeout
 		sem := make(chan struct{}, 20) // Limit concurrency
+		resolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 5 * time.Second}
+				return d.DialContext(ctx, network, address)
+			},
+		}
+
 		for _, ip := range ips {
+			// Check for cancellation
+			select {
+			case <-ctx.Done():
+				break
+			default:
+			}
+
 			wg.Add(1)
 			go func(ip string) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				names, err := net.LookupAddr(ip)
+				// Create per-lookup context with 10 second timeout
+				lookupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+
+				names, err := resolver.LookupAddr(lookupCtx, ip)
 				if err != nil {
 					return
 				}
@@ -333,6 +415,11 @@ func (d *Discoverer) reverseDNS(ips []string) []string {
 
 // reverseDNSWithHakrevdns uses hakrevdns for faster reverse DNS
 func (d *Discoverer) reverseDNSWithHakrevdns(ips []string) []string {
+	return d.reverseDNSWithHakrevdnsContext(context.Background(), ips)
+}
+
+// reverseDNSWithHakrevdnsContext uses hakrevdns with context support
+func (d *Discoverer) reverseDNSWithHakrevdnsContext(ctx context.Context, ips []string) []string {
 	var names []string
 
 	input := strings.Join(ips, "\n")
@@ -342,7 +429,8 @@ func (d *Discoverer) reverseDNSWithHakrevdns(ips []string) []string {
 		args = append(args, "-t", fmt.Sprintf("%d", d.cfg.DNSThreads))
 	}
 
-	r := exec.RunWithInput("hakrevdns", args, input, &exec.Options{Timeout: 5 * time.Minute})
+	// Reduced timeout from 5 to 3 minutes
+	r := exec.RunWithInputAndContext(ctx, "hakrevdns", args, input, &exec.Options{Timeout: 3 * time.Minute})
 	if r.Error != nil {
 		return names
 	}
@@ -359,8 +447,23 @@ func (d *Discoverer) reverseDNSWithHakrevdns(ips []string) []string {
 }
 
 // ffufVHostFuzz uses ffuf for host header fuzzing
+// Limited to max 10 unique IPs to prevent forever scans
 func (d *Discoverer) ffufVHostFuzz(ips []string, baseDomain string) []VHost {
+	return d.ffufVHostFuzzWithContext(context.Background(), ips, baseDomain)
+}
+
+// ffufVHostFuzzWithContext uses ffuf with context support for cancellation
+func (d *Discoverer) ffufVHostFuzzWithContext(ctx context.Context, ips []string, baseDomain string) []VHost {
 	var vhosts []VHost
+	var mu sync.Mutex
+
+	// CRITICAL: Limit IPs to prevent hours-long scans
+	// VHost fuzzing on 1000+ IPs is not practical
+	maxIPs := 10 // Restored to 10 (was 5, original was 10)
+	if len(ips) > maxIPs {
+		fmt.Printf("        [VHost] Limiting from %d to %d IPs for fuzzing\n", len(ips), maxIPs)
+		ips = ips[:maxIPs]
+	}
 
 	// Get vhost wordlist
 	wordlist := d.findVHostWordlist()
@@ -373,77 +476,117 @@ func (d *Discoverer) ffufVHostFuzz(ips []string, baseDomain string) []VHost {
 		defer os.Remove(wordlist)
 	}
 
-	// Fuzz each IP
-	for _, ip := range ips {
-		found := d.ffufSingleHost(ip, wordlist, baseDomain)
-		vhosts = append(vhosts, found...)
+	// Limit concurrent ffuf runs
+	maxConcurrent := 3 // Restored to 3 for better throughput
+	if d.cfg.Threads > 0 && d.cfg.Threads < maxConcurrent {
+		maxConcurrent = d.cfg.Threads
+	}
+	sem := make(chan struct{}, maxConcurrent)
 
-		// Limit to first few IPs to avoid excessive scanning
-		if len(vhosts) > 100 {
+	var wg sync.WaitGroup
+	for _, ip := range ips {
+		// Check for context cancellation before starting new goroutine
+		select {
+		case <-ctx.Done():
+			fmt.Printf("        [VHost] Cancelled, stopping fuzzing\n")
 			break
+		default:
 		}
+
+		wg.Add(1)
+		sem <- struct{}{} // Acquire semaphore
+
+		go func(targetIP string) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release semaphore
+
+			// Check context again inside goroutine
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			found := d.ffufSingleHostWithContext(ctx, targetIP, wordlist, baseDomain)
+
+			mu.Lock()
+			vhosts = append(vhosts, found...)
+			mu.Unlock()
+		}(ip)
 	}
 
+	wg.Wait()
 	return vhosts
 }
 
 // ffufSingleHost fuzzes a single host with vhost wordlist
+// Only tries HTTPS to reduce scan time (most vhosts are HTTPS)
 func (d *Discoverer) ffufSingleHost(ip, wordlist, baseDomain string) []VHost {
+	return d.ffufSingleHostWithContext(context.Background(), ip, wordlist, baseDomain)
+}
+
+// ffufSingleHostWithContext fuzzes a single host with context support
+func (d *Discoverer) ffufSingleHostWithContext(ctx context.Context, ip, wordlist, baseDomain string) []VHost {
 	var vhosts []VHost
 
-	// Try both HTTP and HTTPS
-	protocols := []string{"http", "https"}
+	// Check context before starting
+	select {
+	case <-ctx.Done():
+		return vhosts
+	default:
+	}
 
-	for _, proto := range protocols {
-		url := fmt.Sprintf("%s://%s/", proto, ip)
+	// Only try HTTPS - most production vhosts use HTTPS
+	// Trying both doubles scan time for marginal benefit
+	url := fmt.Sprintf("https://%s/", ip)
 
-		args := []string{
-			"-u", url,
-			"-H", "Host: FUZZ." + baseDomain,
-			"-w", wordlist,
-			"-mc", "200,201,202,203,204,301,302,307,308,401,403",
-			"-fs", "0", // Filter zero-length responses
-			"-o", "/dev/stdout",
-			"-of", "json",
-			"-t", "50",
-			"-timeout", "10",
-			"-s", // Silent mode
-		}
+	args := []string{
+		"-u", url,
+		"-H", "Host: FUZZ." + baseDomain,
+		"-w", wordlist,
+		"-mc", "200,201,202,203,204,301,302,307,308,401,403",
+		"-fs", "0", // Filter zero-length responses
+		"-o", "/dev/stdout",
+		"-of", "json",
+		"-t", "30",      // Restored to 30 threads
+		"-timeout", "5", // Restored to 5s per request
+		"-s",            // Silent mode
+	}
 
-		if d.cfg.RateLimit > 0 {
-			args = append(args, "-rate", fmt.Sprintf("%d", d.cfg.RateLimit))
-		}
+	if d.cfg.RateLimit > 0 {
+		args = append(args, "-rate", fmt.Sprintf("%d", d.cfg.RateLimit))
+	}
 
-		r := exec.Run("ffuf", args, &exec.Options{Timeout: 10 * time.Minute})
-		if r.Error != nil {
-			continue
-		}
+	// 2 minute timeout per host (restored)
+	r := exec.RunWithContext(ctx, "ffuf", args, &exec.Options{Timeout: 2 * time.Minute})
+	if r.Error != nil {
+		return vhosts
+	}
 
-		// Parse ffuf JSON output
-		var ffufResult struct {
-			Results []struct {
-				Input struct {
-					FUZZ string `json:"FUZZ"`
-				} `json:"input"`
-				Status int   `json:"status"`
-				Length int64 `json:"length"`
-				Words  int   `json:"words"`
-			} `json:"results"`
-		}
+	// Parse ffuf JSON output
+	var ffufResult struct {
+		Results []struct {
+			Input struct {
+				FUZZ string `json:"FUZZ"`
+			} `json:"input"`
+			Status int   `json:"status"`
+			Length int64 `json:"length"`
+			Words  int   `json:"words"`
+		} `json:"results"`
+	}
 
-		if json.Unmarshal([]byte(r.Stdout), &ffufResult) == nil {
-			for _, res := range ffufResult.Results {
-				host := res.Input.FUZZ + "." + baseDomain
-				vhosts = append(vhosts, VHost{
-					Host:       host,
-					Target:     ip,
-					StatusCode: res.Status,
-					Size:       res.Length,
-					Words:      res.Words,
-					Source:     "ffuf",
-					Verified:   true, // ffuf already verified it responds
-				})
-			}
+	if json.Unmarshal([]byte(r.Stdout), &ffufResult) == nil {
+		for _, res := range ffufResult.Results {
+			host := res.Input.FUZZ + "." + baseDomain
+			vhosts = append(vhosts, VHost{
+				Host:       host,
+				Target:     ip,
+				StatusCode: res.Status,
+				Size:       res.Length,
+				Words:      res.Words,
+				Source:     "ffuf",
+				Verified:   true, // ffuf already verified it responds
+			})
 		}
 	}
 
@@ -535,13 +678,30 @@ func (d *Discoverer) deduplicateVHosts(vhosts []VHost) []VHost {
 
 // verifyVHosts verifies discovered vhosts by making HTTP requests
 func (d *Discoverer) verifyVHosts(vhosts []VHost, targetIP string) []VHost {
+	return d.verifyVHostsWithContext(context.Background(), vhosts, targetIP)
+}
+
+// verifyVHostsWithContext verifies vhosts with context support
+func (d *Discoverer) verifyVHostsWithContext(ctx context.Context, vhosts []VHost, targetIP string) []VHost {
 	var verified []VHost
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 20) // Limit concurrency
+	sem := make(chan struct{}, 20) // Restored to 20 for throughput
+
+	// Limit number of vhosts to verify to prevent long verification times
+	maxVerify := 50
+	unverifiedCount := 0
+	for _, vh := range vhosts {
+		if !vh.Verified {
+			unverifiedCount++
+		}
+	}
+	if unverifiedCount > maxVerify {
+		fmt.Printf("        [VHost] Limiting verification from %d to %d vhosts\n", unverifiedCount, maxVerify)
+	}
 
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 5 * time.Second, // Reduced from 10 to 5 seconds
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
@@ -550,10 +710,24 @@ func (d *Discoverer) verifyVHosts(vhosts []VHost, targetIP string) []VHost {
 		},
 	}
 
+	verifyCount := 0
 	for _, vh := range vhosts {
 		if vh.Verified {
 			verified = append(verified, vh)
 			continue
+		}
+
+		// Limit unverified hosts to check
+		verifyCount++
+		if verifyCount > maxVerify {
+			continue
+		}
+
+		// Check context
+		select {
+		case <-ctx.Done():
+			break
+		default:
 		}
 
 		wg.Add(1)
@@ -562,30 +736,34 @@ func (d *Discoverer) verifyVHosts(vhosts []VHost, targetIP string) []VHost {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			// Try HTTPS first, then HTTP
-			for _, proto := range []string{"https", "http"} {
-				url := fmt.Sprintf("%s://%s/", proto, targetIP)
-				req, err := http.NewRequest("GET", url, nil)
-				if err != nil {
-					continue
-				}
-				req.Host = vh.Host
+			// Check context inside goroutine
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 
-				resp, err := client.Do(req)
-				if err != nil {
-					continue
-				}
-
-				vh.StatusCode = resp.StatusCode
-				vh.Target = targetIP
-				vh.Verified = true
-				resp.Body.Close()
-
-				mu.Lock()
-				verified = append(verified, vh)
-				mu.Unlock()
+			// Only try HTTPS (most common) to save time
+			url := fmt.Sprintf("https://%s/", targetIP)
+			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+			if err != nil {
 				return
 			}
+			req.Host = vh.Host
+
+			resp, err := client.Do(req)
+			if err != nil {
+				return
+			}
+
+			vh.StatusCode = resp.StatusCode
+			vh.Target = targetIP
+			vh.Verified = true
+			resp.Body.Close()
+
+			mu.Lock()
+			verified = append(verified, vh)
+			mu.Unlock()
 		}(vh)
 	}
 

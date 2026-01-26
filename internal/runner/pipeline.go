@@ -24,6 +24,7 @@ import (
 	"github.com/rootsploit/reconator/internal/portscan"
 	"github.com/rootsploit/reconator/internal/report"
 	"github.com/rootsploit/reconator/internal/screenshot"
+	"github.com/rootsploit/reconator/internal/secheaders"
 	"github.com/rootsploit/reconator/internal/storage"
 	"github.com/rootsploit/reconator/internal/subdomain"
 	"github.com/rootsploit/reconator/internal/sysinfo"
@@ -31,6 +32,7 @@ import (
 	"github.com/rootsploit/reconator/internal/techdetect"
 	"github.com/rootsploit/reconator/internal/tools"
 	"github.com/rootsploit/reconator/internal/version"
+	"github.com/rootsploit/reconator/internal/vhost"
 	"github.com/rootsploit/reconator/internal/vulnscan"
 	"github.com/rootsploit/reconator/internal/waf"
 )
@@ -42,10 +44,11 @@ import (
 // - Resumable scans (reads from storage)
 // - Cleaner phase lifecycle management
 type PipelineRunner struct {
-	cfg     *config.Config
-	checker *tools.Checker
-	out     *output.Manager
-	storage storage.Storage
+	cfg      *config.Config
+	checker  *tools.Checker
+	out      *output.Manager
+	storage  storage.Storage
+	progress *PhaseProgress
 }
 
 // NewPipelineRunner creates a new pipeline-based runner
@@ -76,7 +79,7 @@ func (r *PipelineRunner) Run() error {
 
 	if missing := r.checker.GetMissingRequired(); len(missing) > 0 {
 		yellow.Printf("\n⚠ Missing required tools: %v\n", missing)
-		fmt.Println("  Run 'reconator install' to install them\n")
+		fmt.Println("  Run 'reconator install' to install them")
 	}
 
 	targets, err := r.getTargets()
@@ -97,7 +100,8 @@ func (r *PipelineRunner) Run() error {
 	if maxConcurrent > 1 && len(targets) > 1 {
 		cyan.Printf(" [%d parallel]", maxConcurrent)
 	}
-	cyan.Println("\n")
+	cyan.Println()
+	fmt.Println()
 
 	// Process targets with parallelism based on config
 	if maxConcurrent == 1 || len(targets) == 1 {
@@ -148,6 +152,9 @@ func (r *PipelineRunner) processTarget(target string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Initialize progress tracker (respects debug mode internally)
+	r.progress = NewPhaseProgress(r.cfg.Debug)
+
 	cyan := color.New(color.FgCyan, color.Bold)
 	green := color.New(color.FgGreen)
 	yellow := color.New(color.FgYellow)
@@ -192,14 +199,17 @@ func (r *PipelineRunner) processTarget(target string) error {
 	}
 
 	cyan.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-	cyan.Printf("  Target: %s [PIPELINE MODE]", target)
+	cyan.Printf("  Target: %s", target)
 	if r.cfg.PassiveMode {
 		cyan.Printf(" [PASSIVE]")
 	}
 	if resumeScanID != "" {
 		cyan.Printf(" [RESUME]")
 	}
-	cyan.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+	cyan.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+	// Print phase list in clean mode (progress tracker handles debug check)
+	r.progress.PrintPhaseList()
 
 	// Initialize output manager with SQLite
 	var err error
@@ -281,8 +291,16 @@ func (r *PipelineRunner) processTarget(target string) error {
 		sqliteStorage = s
 	}
 
+	// Detect target type to determine execution order
+	isASN := iprange.IsASN(target) || iprange.IsIPTarget(target)
+
 	// Get execution order (phases grouped by level)
-	groups := pipeline.GetParallelGroups()
+	// For ASN/IP targets: IPRange must run before Subdomain to discover TLDs
+	groups := pipeline.GetParallelGroupsForTarget(isASN)
+
+	if isASN {
+		cyan.Printf("[*] ASN/IP target detected - running IP Range discovery first\n\n")
+	}
 
 	for _, group := range groups {
 		// Check for interruption
@@ -305,14 +323,19 @@ func (r *PipelineRunner) processTarget(target string) error {
 
 		// Check dependencies - phases can run if:
 		// 1. All dependencies are completed in this run, OR
-		// 2. Dependencies were not requested but data exists from previous runs
+		// 2. Dependencies were skipped (not applicable for this target type), OR
+		// 3. Dependencies were not requested but data exists from previous runs
 		var runnablePhases []pipeline.Phase
 		for _, phase := range groupPhases {
 			deps := pipeline.GetDependencies(phase)
 			allDepsComplete := true
 			for _, dep := range deps {
-				// If dependency was requested in this run, it must be completed
+				// If dependency was requested in this run, it must be completed OR skipped
 				if phasesToRun[dep] && !completed[dep] {
+					// Check if dependency was skipped (e.g., IPRange skipped for domain targets)
+					if r.shouldSkipPhase(dep) {
+						continue // Skipped phases count as "satisfied" dependency
+					}
 					allDepsComplete = false
 					break
 				}
@@ -327,15 +350,8 @@ func (r *PipelineRunner) processTarget(target string) error {
 			continue
 		}
 
-		// Print phase group header
-		if len(runnablePhases) > 1 {
-			var names []string
-			for _, p := range runnablePhases {
-				names = append(names, string(p))
-			}
-			cyan.Printf("[Level %d] Running %d phases in parallel: %v\n", group.Level, len(runnablePhases), names)
-		}
-		fmt.Println("───────────────────────────────────────────────────")
+		// Print level header (progress tracker handles debug mode)
+		r.progress.PrintLevelHeader(group.Level, runnablePhases)
 
 		// Execute phases in this group concurrently
 		var wg sync.WaitGroup
@@ -351,8 +367,15 @@ func (r *PipelineRunner) processTarget(target string) error {
 				defer wg.Done()
 
 				phaseStart := time.Now()
-				displayName := pipeline.GetPhaseDisplayName(p)
-				fmt.Printf("    %s...\n", displayName)
+
+				// Mark phase as running (progress tracker handles debug mode)
+				r.progress.MarkRunning(p)
+
+				// In debug mode, also print the detailed message
+				if r.cfg.Debug {
+					displayName := pipeline.GetPhaseDisplayName(p)
+					fmt.Printf("    %s...\n", displayName)
+				}
 
 				result, err := exec.Execute(ctx, p)
 				if err != nil {
@@ -411,21 +434,33 @@ func (r *PipelineRunner) processTarget(target string) error {
 					startTime, endTime, res.result.Duration.Milliseconds(), errorMsg)
 			}
 
-			// Print result
+			// Update progress tracker and print result
 			switch res.result.Status {
 			case pipeline.StatusCompleted:
-				green.Printf("    ✓ %s completed (%s)\n", pipeline.PhaseName[res.phase], res.result.Duration.Round(time.Millisecond))
+				// Extract counts from result data for display
+				counts := r.extractResultCounts(res.phase, res.result)
+				r.progress.SetCounts(res.phase, counts)
+				r.progress.MarkCompleted(res.phase, res.result.Duration)
+				// Debug mode: print detailed output
+				if r.cfg.Debug {
+					green.Printf("    ✓ %s completed (%s)\n", pipeline.PhaseName[res.phase], res.result.Duration.Round(time.Millisecond))
+				}
 			case pipeline.StatusSkipped:
-				yellow.Printf("    ○ %s skipped\n", pipeline.PhaseName[res.phase])
+				r.progress.MarkSkipped(res.phase)
+				if r.cfg.Debug {
+					yellow.Printf("    ○ %s skipped\n", pipeline.PhaseName[res.phase])
+				}
 			case pipeline.StatusFailed:
-				red.Printf("    ✗ %s failed: %v\n", pipeline.PhaseName[res.phase], res.result.Error)
+				r.progress.MarkFailed(res.phase, res.result.Error)
+				if r.cfg.Debug {
+					red.Printf("    ✗ %s failed: %v\n", pipeline.PhaseName[res.phase], res.result.Error)
+				}
 			}
 		}
-		fmt.Println()
 	}
 
-	// Print summary
-	r.printSummary(results, start)
+	// Print summary (progress tracker handles debug mode)
+	r.progress.PrintSummary(time.Since(start), filepath.Join(r.cfg.OutputDir, target))
 
 	// Save final summary
 	r.out.SaveSummary(target)
@@ -473,9 +508,11 @@ func (r *PipelineRunner) getPhasesToRun() map[pipeline.Phase]bool {
 			"subdomain":  pipeline.PhaseSubdomain,
 			"waf":        pipeline.PhaseWAF,
 			"ports":      pipeline.PhasePorts,
+			"vhost":      pipeline.PhaseVHost,
 			"takeover":   pipeline.PhaseTakeover,
 			"historic":   pipeline.PhaseHistoric,
 			"tech":       pipeline.PhaseTech,
+			"secheaders": pipeline.PhaseSecHeaders,
 			"dirbrute":   pipeline.PhaseDirBrute,
 			"vulnscan":   pipeline.PhaseVulnScan,
 			"screenshot": pipeline.PhaseScreenshot,
@@ -498,6 +535,11 @@ func (r *PipelineRunner) getPhasesToRun() map[pipeline.Phase]bool {
 // shouldSkipPhase returns true if a phase should be skipped based on config
 func (r *PipelineRunner) shouldSkipPhase(phase pipeline.Phase) bool {
 	switch phase {
+	case pipeline.PhaseIPRange:
+		// IPRange only runs for ASN/IP targets, skip for domain targets
+		if !iprange.IsASN(r.cfg.Target) && !iprange.IsIPTarget(r.cfg.Target) {
+			return true
+		}
 	case pipeline.PhasePorts, pipeline.PhaseTech:
 		if r.cfg.PassiveMode {
 			return true
@@ -562,6 +604,14 @@ func (r *PipelineRunner) savePhaseResult(phase pipeline.Phase, result *pipeline.
 	case pipeline.PhaseTech:
 		if data, ok := result.Data.(*techdetect.Result); ok {
 			r.out.SaveTechResults(data)
+		}
+	case pipeline.PhaseSecHeaders:
+		if data, ok := result.Data.(*secheaders.Result); ok {
+			r.out.SaveSecHeadersResults(data)
+		}
+	case pipeline.PhaseVHost:
+		if data, ok := result.Data.(*vhost.Result); ok {
+			r.out.SaveVHostResults(data)
 		}
 	case pipeline.PhaseDirBrute:
 		if data, ok := result.Data.(*dirbrute.Result); ok {
@@ -654,9 +704,11 @@ func (r *PipelineRunner) phaseFromString(name string) (pipeline.Phase, bool) {
 		"subdomain":  pipeline.PhaseSubdomain,
 		"waf":        pipeline.PhaseWAF,
 		"ports":      pipeline.PhasePorts,
+		"vhost":      pipeline.PhaseVHost,
 		"takeover":   pipeline.PhaseTakeover,
 		"historic":   pipeline.PhaseHistoric,
 		"tech":       pipeline.PhaseTech,
+		"secheaders": pipeline.PhaseSecHeaders,
 		"dirbrute":   pipeline.PhaseDirBrute,
 		"vulnscan":   pipeline.PhaseVulnScan,
 		"screenshot": pipeline.PhaseScreenshot,
@@ -733,6 +785,16 @@ func (r *PipelineRunner) generateReport(target string, results map[pipeline.Phas
 	if res, ok := results[pipeline.PhaseTech]; ok && res.Status == pipeline.StatusCompleted {
 		if data, ok := res.Data.(*techdetect.Result); ok {
 			reportData.Tech = data
+		}
+	}
+	if res, ok := results[pipeline.PhaseSecHeaders]; ok && res.Status == pipeline.StatusCompleted {
+		if data, ok := res.Data.(*secheaders.Result); ok {
+			reportData.SecHeaders = data
+		}
+	}
+	if res, ok := results[pipeline.PhaseVHost]; ok && res.Status == pipeline.StatusCompleted {
+		if data, ok := res.Data.(*vhost.Result); ok {
+			reportData.VHost = data
 		}
 	}
 	if res, ok := results[pipeline.PhaseDirBrute]; ok && res.Status == pipeline.StatusCompleted {
@@ -857,4 +919,71 @@ func loadJSON[T any](path string) *T {
 		return nil
 	}
 	return &result
+}
+
+// extractResultCounts extracts key metrics from phase results for progress display
+func (r *PipelineRunner) extractResultCounts(phase pipeline.Phase, result *pipeline.PhaseResult) map[string]int {
+	counts := make(map[string]int)
+	if result.Data == nil {
+		return counts
+	}
+
+	switch phase {
+	case pipeline.PhaseSubdomain:
+		if data, ok := result.Data.(*subdomain.Result); ok {
+			counts["subdomains"] = data.TotalAll  // All discovered
+			counts["validated"] = data.Total      // Validated (alive)
+		}
+	case pipeline.PhaseWAF:
+		if data, ok := result.Data.(*waf.Result); ok {
+			counts["cdn"] = len(data.CDNHosts)
+			counts["direct"] = len(data.DirectHosts)
+		}
+	case pipeline.PhasePorts:
+		if data, ok := result.Data.(*portscan.Result); ok {
+			counts["alive"] = data.AliveCount
+			counts["ports"] = data.TotalPorts
+		}
+	case pipeline.PhaseTakeover:
+		if data, ok := result.Data.(*takeover.Result); ok {
+			counts["vulnerable"] = len(data.Vulnerable)
+		}
+	case pipeline.PhaseHistoric:
+		if data, ok := result.Data.(*historic.Result); ok {
+			counts["urls"] = len(data.URLs)
+			counts["js"] = len(data.Categorized.JSFiles)
+		}
+	case pipeline.PhaseTech:
+		if data, ok := result.Data.(*techdetect.Result); ok {
+			counts["techs"] = data.Total
+		}
+	case pipeline.PhaseDirBrute:
+		if data, ok := result.Data.(*dirbrute.Result); ok {
+			counts["discoveries"] = len(data.Discoveries)
+		}
+	case pipeline.PhaseVulnScan:
+		if data, ok := result.Data.(*vulnscan.Result); ok {
+			for _, v := range data.Vulnerabilities {
+				switch v.Severity {
+				case "critical":
+					counts["critical"]++
+				case "high":
+					counts["high"]++
+				case "medium":
+					counts["medium"]++
+				}
+			}
+		}
+	case pipeline.PhaseScreenshot:
+		if data, ok := result.Data.(*screenshot.Result); ok {
+			counts["screenshots"] = len(data.Screenshots)
+		}
+	case pipeline.PhaseIPRange:
+		if data, ok := result.Data.(*iprange.Result); ok {
+			counts["ips"] = len(data.IPs)
+			counts["domains"] = len(data.Domains)
+		}
+	}
+
+	return counts
 }

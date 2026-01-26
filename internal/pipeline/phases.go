@@ -14,13 +14,14 @@ const (
 	PhaseTakeover   Phase = "takeover"   // Phase 5
 	PhaseHistoric   Phase = "historic"   // Phase 6
 	PhaseTech       Phase = "tech"       // Phase 7
-	PhaseDirBrute   Phase = "dirbrute"   // Phase 8
-	PhaseVulnScan   Phase = "vulnscan"   // Phase 9
-	PhaseScreenshot Phase = "screenshot" // Phase 10 (Visual Recon)
-	PhaseAIGuided   Phase = "aiguided"   // Phase 11
+	PhaseSecHeaders Phase = "secheaders" // Phase 8 (Security Headers Check)
+	PhaseDirBrute   Phase = "dirbrute"   // Phase 9
+	PhaseVulnScan   Phase = "vulnscan"   // Phase 10
+	PhaseScreenshot Phase = "screenshot" // Phase 11 (Visual Recon)
+	PhaseAIGuided   Phase = "aiguided"   // Phase 12
 )
 
-// PhaseNumber maps phases to their display number (Phase 0-11)
+// PhaseNumber maps phases to their display number (Phase 0-12)
 var PhaseNumber = map[Phase]int{
 	PhaseIPRange:    0,
 	PhaseSubdomain:  1,
@@ -30,10 +31,11 @@ var PhaseNumber = map[Phase]int{
 	PhaseTakeover:   5,
 	PhaseHistoric:   6,
 	PhaseTech:       7,
-	PhaseDirBrute:   8,
-	PhaseVulnScan:   9,
-	PhaseScreenshot: 10,
-	PhaseAIGuided:   11,
+	PhaseSecHeaders: 8,
+	PhaseDirBrute:   9,
+	PhaseVulnScan:   10,
+	PhaseScreenshot: 11,
+	PhaseAIGuided:   12,
 }
 
 // PhaseName maps phases to their display name
@@ -46,6 +48,7 @@ var PhaseName = map[Phase]string{
 	PhaseTakeover:   "Subdomain Takeover Check",
 	PhaseHistoric:   "Historic URL Collection",
 	PhaseTech:       "Technology Detection",
+	PhaseSecHeaders: "Security Headers Check",
 	PhaseDirBrute:   "Directory Bruteforce",
 	PhaseVulnScan:   "Vulnerability Scanning",
 	PhaseScreenshot: "Visual Recon (Screenshots)",
@@ -54,19 +57,21 @@ var PhaseName = map[Phase]string{
 
 // PhaseDependencies defines what each phase requires from previous phases
 // Key: phase that needs input, Value: phases it depends on
+// Note: These are soft dependencies - phase can run with partial data
 var PhaseDependencies = map[Phase][]Phase{
 	PhaseIPRange:    {}, // No dependencies - entry point for IP/ASN targets
-	PhaseSubdomain:  {}, // No dependencies - entry point for domain targets
-	PhaseWAF:        {PhaseSubdomain},
-	PhasePorts:      {PhaseSubdomain}, // WAF is optional (used for filtering)
+	PhaseSubdomain:  {PhaseIPRange}, // Soft dep: loads TLDs from IPRange for ASN targets
+	PhaseWAF:        {PhasePorts},     // WAF needs alive hosts from ports for CDN detection
+	PhasePorts:      {PhaseSubdomain}, // Ports needs subdomains to scan
 	PhaseVHost:      {PhasePorts},     // Needs alive hosts for VHost fuzzing
 	PhaseTakeover:   {PhaseSubdomain},
-	PhaseHistoric:   {PhaseSubdomain},
+	PhaseHistoric:   {}, // NO DEPENDENCY - runs parallel with Subdomain! Only needs root domain for gau/waybackurls/urlfinder
 	PhaseTech:       {PhasePorts},
+	PhaseSecHeaders: {PhasePorts}, // Needs alive hosts for header checking
 	PhaseDirBrute:   {PhasePorts}, // WAF is optional (used for filtering)
 	PhaseVulnScan:   {PhasePorts, PhaseHistoric, PhaseTech}, // Tech enables tech-aware scanning
 	PhaseScreenshot: {PhasePorts},                           // Needs alive hosts for screenshot URLs
-	PhaseAIGuided:   {PhasePorts, PhaseTech, PhaseVulnScan},
+	PhaseAIGuided:   {PhasePorts, PhaseTech, PhaseVulnScan, PhaseSecHeaders}, // SecHeaders for summary
 }
 
 // PhaseProduces defines what data each phase produces
@@ -79,6 +84,7 @@ var PhaseProduces = map[Phase][]string{
 	PhaseTakeover:   {"vulnerable_subs"},
 	PhaseHistoric:   {"urls", "categorized_urls", "extracted_subdomains"},
 	PhaseTech:       {"tech_by_host", "tech_count"},
+	PhaseSecHeaders: {"header_findings", "email_security", "misconfig_vulns"},
 	PhaseDirBrute:   {"discoveries"},
 	PhaseVulnScan:   {"vulnerabilities"},
 	PhaseScreenshot: {"screenshots", "clusters", "cluster_summary"},
@@ -101,6 +107,7 @@ func GetAllPhases() []Phase {
 		PhaseTakeover,
 		PhaseHistoric,
 		PhaseTech,
+		PhaseSecHeaders,
 		PhaseDirBrute,
 		PhaseVulnScan,
 		PhaseScreenshot,

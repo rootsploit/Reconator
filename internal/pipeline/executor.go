@@ -159,19 +159,64 @@ func (e *Executor) CheckDependencies(ctx context.Context, phase Phase) (bool, []
 // considering parallelism opportunities
 func GetExecutionOrder() [][]Phase {
 	return [][]Phase{
-		// Level 0: Entry points (no dependencies)
-		{PhaseIPRange, PhaseSubdomain},
-		// Level 1: Depend on subdomain only (can run in parallel)
-		{PhaseWAF, PhaseTakeover, PhaseHistoric},
-		// Level 2: Depend on ports
+		// Level 0: Entry points (no dependencies) - Historic runs parallel with Subdomain!
+		// Historic only needs root domain for gau/waybackurls/urlfinder (saves 2-3 min)
+		{PhaseIPRange, PhaseSubdomain, PhaseHistoric},
+		// Level 1: Takeover only needs subdomains (can run before ports)
+		{PhaseTakeover},
+		// Level 2: Port scanning to get alive hosts
 		{PhasePorts},
-		// Level 3: Depend on ports (can run in parallel)
-		{PhaseTech, PhaseDirBrute, PhaseScreenshot},
-		// Level 4: Depend on multiple phases (tech-aware vulnscan needs tech data)
+		// Level 3: WAF detection needs alive hosts from ports (provides CDN filtering for Level 4)
+		{PhaseWAF},
+		// Level 4: Depend on ports + WAF filtering (can run in parallel)
+		{PhaseTech, PhaseSecHeaders, PhaseDirBrute, PhaseScreenshot, PhaseVHost},
+		// Level 5: Depend on multiple phases (tech-aware vulnscan needs tech data)
 		{PhaseVulnScan},
-		// Level 5: Final analysis
+		// Level 6: Final analysis
 		{PhaseAIGuided},
 	}
+}
+
+// GetExecutionOrderForASN returns phases in order for ASN/IP targets
+// Key difference: Subdomain enumeration depends on IPRange to get TLDs first
+func GetExecutionOrderForASN() [][]Phase {
+	return [][]Phase{
+		// Level 0: IP Range discovery first (ASN → CIDRs → IPs → domains → TLDs)
+		// Historic also runs here (only needs root domain/ASN)
+		{PhaseIPRange, PhaseHistoric},
+		// Level 1: Subdomain enumeration on discovered TLDs
+		{PhaseSubdomain},
+		// Level 2: Takeover only needs subdomains
+		{PhaseTakeover},
+		// Level 3: Port scanning to get alive hosts
+		{PhasePorts},
+		// Level 4: WAF detection needs alive hosts (provides CDN filtering)
+		{PhaseWAF},
+		// Level 5: Depend on ports + WAF filtering (can run in parallel)
+		{PhaseTech, PhaseSecHeaders, PhaseDirBrute, PhaseScreenshot, PhaseVHost},
+		// Level 6: Tech-aware vulnscan
+		{PhaseVulnScan},
+		// Level 7: Final analysis
+		{PhaseAIGuided},
+	}
+}
+
+// GetParallelGroupsForTarget returns phase groups based on target type
+func GetParallelGroupsForTarget(isASN bool) []PhaseGroup {
+	var order [][]Phase
+	if isASN {
+		order = GetExecutionOrderForASN()
+	} else {
+		order = GetExecutionOrder()
+	}
+	groups := make([]PhaseGroup, len(order))
+	for i, phases := range order {
+		groups[i] = PhaseGroup{
+			Phases: phases,
+			Level:  i,
+		}
+	}
+	return groups
 }
 
 // PhaseGroup represents a set of phases that can run concurrently

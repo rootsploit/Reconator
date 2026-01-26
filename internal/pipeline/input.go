@@ -43,6 +43,14 @@ type PhaseInput struct {
 
 	// From dirbrute phase
 	Discoveries []Discovery
+
+	// From secheaders phase
+	SecurityHeaderIssues int // Count of hosts with missing security headers
+
+	// From iprange phase (ASN/IP targets)
+	IPRangeIPs         []string // Discovered IPs
+	IPRangeDomains     []string // Domains found via reverse DNS/certs
+	IPRangeBaseDomains []string // Unique TLDs extracted from domains
 }
 
 // CategorizedURLs groups URLs by vulnerability type for targeted scanning
@@ -114,6 +122,11 @@ func (p *PhaseInput) HasURLs() bool {
 // HasTechStack returns true if technology detection data is available
 func (p *PhaseInput) HasTechStack() bool {
 	return len(p.TechByHost) > 0
+}
+
+// HasIPRangeData returns true if IP range discovery data is available
+func (p *PhaseInput) HasIPRangeData() bool {
+	return len(p.IPRangeBaseDomains) > 0 || len(p.IPRangeDomains) > 0
 }
 
 // GetHostsForScanning returns the appropriate host list for scanning

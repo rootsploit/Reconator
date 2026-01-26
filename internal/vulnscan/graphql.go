@@ -339,7 +339,10 @@ func (r *GraphQLResult) SaveGraphQLResults(dir string) error {
 	os.WriteFile(filepath.Join(dir, "graphql.json"), data, 0644)
 
 	// Save endpoints to text
-	f, _ := os.Create(filepath.Join(dir, "graphql_endpoints.txt"))
+	f, err := os.Create(filepath.Join(dir, "graphql_endpoints.txt"))
+	if err != nil {
+		return err
+	}
 	defer f.Close()
 
 	for _, ep := range r.Endpoints {

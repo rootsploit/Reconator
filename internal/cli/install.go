@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/rootsploit/reconator/internal/aiguided"
+	"github.com/rootsploit/reconator/internal/alerting"
 	"github.com/rootsploit/reconator/internal/tools"
 	"github.com/spf13/cobra"
 )
@@ -46,7 +48,8 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	cyan := color.New(color.FgCyan, color.Bold)
 	gray := color.New(color.FgHiBlack)
 
-	cyan.Println("\n[+] Installing Reconator Dependencies\n")
+	cyan.Println("\n[+] Installing Reconator Dependencies")
+	fmt.Println()
 
 	installer := tools.NewInstaller()
 	platform := installer.GetPlatform()
@@ -274,6 +277,32 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		yellow.Println("    ○ Chrome: not found (required for gowitness screenshots)")
 		yellow.Printf("      %s\n", installer.GetChromeInstallInstructions())
 	}
+
+	// Step 8: Create config templates
+	fmt.Println("\n[*] Creating configuration templates...")
+
+	// Subfinder provider config
+	if err := alerting.CreateSubfinderConfig(); err != nil {
+		yellow.Printf("    ✗ subfinder config: %v\n", err)
+	} else {
+		green.Println("    ✓ subfinder provider config (~/.config/subfinder/provider-config.yaml)")
+	}
+
+	// Notify config for alerts
+	if err := alerting.CreateDefaultConfig(); err != nil {
+		yellow.Printf("    ✗ notify config: %v\n", err)
+	} else {
+		green.Println("    ✓ notify config (~/.reconator/notify-config.yaml)")
+	}
+
+	// AI config for AI-guided scanning
+	if err := aiguided.CreateDefaultConfigFile(); err != nil {
+		yellow.Printf("    ✗ AI config: %v\n", err)
+	} else {
+		green.Println("    ✓ AI config (~/.reconator/ai-config.yaml)")
+	}
+
+	gray.Println("    Edit these files to add your API keys")
 
 	// Summary
 	elapsed := time.Since(startTime).Round(time.Second)

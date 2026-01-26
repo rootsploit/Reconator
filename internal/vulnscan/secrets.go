@@ -288,7 +288,10 @@ func (r *SecretsResult) SaveSecretsResults(dir string) error {
 	data, _ := json.MarshalIndent(r, "", "  ")
 	os.WriteFile(filepath.Join(dir, "secrets.json"), data, 0644)
 
-	f, _ := os.Create(filepath.Join(dir, "secrets_critical.txt"))
+	f, err := os.Create(filepath.Join(dir, "secrets_critical.txt"))
+	if err != nil {
+		return err
+	}
 	defer f.Close()
 	for _, s := range r.Secrets {
 		if s.Severity == "critical" {

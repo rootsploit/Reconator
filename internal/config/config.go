@@ -60,6 +60,11 @@ type Config struct {
 	// Debug
 	Debug bool // Show detailed timing logs for each tool execution
 
+	// Timeouts
+	ScanTimeout  int // Global scan timeout in minutes (default: 0 = no limit)
+	PhaseTimeout int // Per-phase timeout in minutes (default: 30)
+	VHostTimeout int // VHost phase timeout in minutes (default: 10)
+
 	// Storage
 	EnableSQLite bool // Enable SQLite persistence for dashboard queries (default: true)
 
@@ -84,12 +89,15 @@ func DefaultConfig() *Config {
 		DNSThreads:        0,      // 0 = auto-detect based on profile
 		MaxConcTargets:    0,      // 0 = auto-detect based on profile
 		UseOptional:       true,
-		EnableSQLite:      true,  // Default ON - enables dashboard queries
-		AutoResume:        true,  // Default ON - auto-resume interrupted scans
-		EnableScreenshots: true,  // Default ON
-		EnableGraphQL:     true,  // Default ON
-		EnableOSINT:       true,  // Default ON
-		GenerateReport:    true,  // Default ON
+		ScanTimeout:       0,      // 0 = no global limit
+		PhaseTimeout:      30,     // 30 minutes per phase max
+		VHostTimeout:      10,     // 10 minutes for VHost (tends to hang)
+		EnableSQLite:      true,   // Default ON - enables dashboard queries
+		AutoResume:        true,   // Default ON - auto-resume interrupted scans
+		EnableScreenshots: true,   // Default ON
+		EnableGraphQL:     true,   // Default ON
+		EnableOSINT:       true,   // Default ON
+		GenerateReport:    true,   // Default ON
 	}
 }
 

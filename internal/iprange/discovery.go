@@ -18,12 +18,13 @@ import (
 )
 
 type Result struct {
-	Target            string            `json:"target"`
-	IPs               []string          `json:"ips"`
-	Domains           []string          `json:"domains"`
-	Sources           map[string]int    `json:"sources"`
+	Target            string              `json:"target"`
+	IPs               []string            `json:"ips"`
+	Domains           []string            `json:"domains"`
+	BaseDomains       []string            `json:"base_domains"` // Unique TLDs for subdomain enumeration
+	Sources           map[string]int      `json:"sources"`
 	IPToDomains       map[string][]string `json:"ip_to_domains"`
-	Duration          time.Duration     `json:"duration"`
+	Duration          time.Duration       `json:"duration"`
 }
 
 type Discoverer struct {
@@ -109,35 +110,10 @@ func (d *Discoverer) DiscoverFromASN(asn string) (*Result, error) {
 	}
 
 	// Fallback to free APIs if asnmap failed or not installed
+	// Run all APIs in parallel and use first successful result
 	if len(cidrs) == 0 {
-		fmt.Println("    [*] Using free API fallbacks (no asnmap or failed)...")
-
-		// Try RIPEstat API (free, no API key)
-		if len(cidrs) == 0 {
-			fmt.Println("        Trying RIPEstat API...")
-			cidrs, _ = fetchASNPrefixesFromRIPEstat(asnNumber)
-			if len(cidrs) > 0 {
-				source = "ripestat"
-			}
-		}
-
-		// Try HackerTarget API (free, 50/day limit)
-		if len(cidrs) == 0 {
-			fmt.Println("        Trying HackerTarget API...")
-			cidrs, _ = fetchASNPrefixesFromHackerTarget(normalizedASN)
-			if len(cidrs) > 0 {
-				source = "hackertarget"
-			}
-		}
-
-		// Try BGPView API (free)
-		if len(cidrs) == 0 {
-			fmt.Println("        Trying BGPView API...")
-			cidrs, _ = fetchASNPrefixesFromBGPView(asnNumber)
-			if len(cidrs) > 0 {
-				source = "bgpview"
-			}
-		}
+		fmt.Println("    [*] Querying free APIs in parallel...")
+		cidrs, source = d.queryASNAPIsParallel(asnNumber, normalizedASN)
 	}
 
 	if len(cidrs) == 0 {
@@ -146,12 +122,8 @@ func (d *Discoverer) DiscoverFromASN(asn string) (*Result, error) {
 	}
 
 	result.Sources[source+"_cidrs"] = len(cidrs)
-	fmt.Printf("        %s: %d CIDR ranges\n", source, len(cidrs))
 
-	if len(cidrs) == 0 {
-		result.Duration = time.Since(start)
-		return result, nil
-	}
+	// Note: queryASNAPIsParallel already prints the source, no duplicate needed
 
 	// Expand CIDRs to get all IPs (with limit for large ranges)
 	var allIPs []string
@@ -187,6 +159,12 @@ func (d *Discoverer) DiscoverFromASN(asn string) (*Result, error) {
 				result.Sources[k] = v
 			}
 		}
+	}
+
+	// Extract unique TLDs (base domains) for subdomain enumeration
+	if len(result.Domains) > 0 {
+		result.BaseDomains = ExtractTLDs(result.Domains)
+		fmt.Printf("    [*] Extracted %d unique TLDs for subdomain enumeration\n", len(result.BaseDomains))
 	}
 
 	result.Duration = time.Since(start)
@@ -768,6 +746,91 @@ func extractBaseDomain(domain string) string {
 
 	// Standard TLD (last two parts)
 	return parts[len(parts)-2] + "." + parts[len(parts)-1]
+}
+
+// queryASNAPIsParallel queries all free ASN APIs in parallel and merges results
+// Uses timeout to skip slow/unreachable APIs
+func (d *Discoverer) queryASNAPIsParallel(asnNumber, normalizedASN string) ([]string, string) {
+	type apiResult struct {
+		cidrs  []string
+		source string
+	}
+
+	resultChan := make(chan apiResult, 3)
+	timeout := 15 * time.Second // Skip slow APIs after 15s
+
+	// Query all APIs in parallel
+	go func() {
+		cidrs, err := fetchASNPrefixesFromRIPEstat(asnNumber)
+		if err != nil {
+			resultChan <- apiResult{source: "ripestat"} // Empty result with source for logging
+		} else {
+			resultChan <- apiResult{cidrs, "ripestat"}
+		}
+	}()
+
+	go func() {
+		cidrs, err := fetchASNPrefixesFromHackerTarget(normalizedASN)
+		if err != nil {
+			resultChan <- apiResult{source: "hackertarget"}
+		} else {
+			resultChan <- apiResult{cidrs, "hackertarget"}
+		}
+	}()
+
+	go func() {
+		cidrs, err := fetchASNPrefixesFromBGPView(asnNumber)
+		if err != nil {
+			resultChan <- apiResult{source: "bgpview"}
+		} else {
+			resultChan <- apiResult{cidrs, "bgpview"}
+		}
+	}()
+
+	// Collect results with timeout - merge all successful ones
+	cidrSet := make(map[string]bool)
+	var sources []string
+	received := 0
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for received < 3 {
+		select {
+		case r := <-resultChan:
+			received++
+			if len(r.cidrs) > 0 {
+				fmt.Printf("        %s: %d CIDR ranges\n", r.source, len(r.cidrs))
+				sources = append(sources, r.source)
+				for _, cidr := range r.cidrs {
+					cidrSet[cidr] = true
+				}
+			} else if r.source != "" {
+				fmt.Printf("        %s: 0 (failed/empty)\n", r.source)
+			}
+		case <-timer.C:
+			fmt.Printf("        [!] Timeout waiting for remaining APIs (%d/%d responded)\n", received, 3)
+			goto done
+		}
+	}
+
+done:
+	// Convert set to slice
+	var mergedCIDRs []string
+	for cidr := range cidrSet {
+		mergedCIDRs = append(mergedCIDRs, cidr)
+	}
+
+	// Build source string
+	var sourceStr string
+	if len(sources) > 0 {
+		sourceStr = strings.Join(sources, "+")
+	}
+
+	if len(mergedCIDRs) > 0 {
+		fmt.Printf("        [*] Merged: %d unique CIDR ranges from %d sources\n", len(mergedCIDRs), len(sources))
+	}
+
+	return mergedCIDRs, sourceStr
 }
 
 // ============================================================================

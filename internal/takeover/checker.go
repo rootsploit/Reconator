@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -174,8 +175,18 @@ func (c *Checker) nuclei(input string) []Vulnerable {
 func (c *Checker) subzy(input string) []Vulnerable {
 	var vulns []Vulnerable
 
-	// Run subzy with --hide_fails to only show vulnerable ones
-	args := []string{"run", "--targets", input, "--concurrency", "50", "--hide_fails", "--https"}
+	// BB-9: Enhanced subzy flags for better accuracy
+	// --verify: Verifies findings (reduces false positives)
+	// --https: Use HTTPS for checks
+	// --hide_fails: Only show vulnerable ones
+	args := []string{
+		"run",
+		"--targets", input,
+		"--concurrency", "50",
+		"--hide_fails",
+		"--https",
+		"--verify_ssl", // BB-9: Verify SSL for accurate results
+	}
 	r := exec.Run("subzy", args, &exec.Options{Timeout: 10 * time.Minute})
 
 	if r.Error != nil {
@@ -219,11 +230,52 @@ func (c *Checker) subzy(input string) []Vulnerable {
 	return vulns
 }
 
+// findSubjackFingerprints locates the subjack fingerprints.json file
+func (c *Checker) findSubjackFingerprints() string {
+	// Common locations for subjack fingerprints
+	home, _ := os.UserHomeDir()
+	paths := []string{
+		filepath.Join(home, "go", "pkg", "mod", "github.com", "haccer", "subjack@v0.0.0-20201112041112-49c51e57deab", "fingerprints.json"),
+		filepath.Join(home, ".reconator", "wordlists", "fingerprints.json"),
+		"/usr/local/share/subjack/fingerprints.json",
+		"/opt/subjack/fingerprints.json",
+	}
+
+	// Also try to find it in GOPATH
+	gopath := os.Getenv("GOPATH")
+	if gopath != "" {
+		// Look for any version of subjack in go modules
+		subjackDir := filepath.Join(gopath, "pkg", "mod", "github.com", "haccer")
+		if entries, err := os.ReadDir(subjackDir); err == nil {
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "subjack@") {
+					fp := filepath.Join(subjackDir, entry.Name(), "fingerprints.json")
+					paths = append([]string{fp}, paths...)
+				}
+			}
+		}
+	}
+
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
 func (c *Checker) subjack(input string) []Vulnerable {
 	var vulns []Vulnerable
 
-	// subjack -w subdomains.txt -timeout 30 -ssl -v
-	args := []string{"-w", input, "-timeout", "30", "-ssl", "-v"}
+	// subjack -w subdomains.txt -timeout 30 -ssl -v -c fingerprints.json
+	// Find fingerprints.json in common locations
+	fingerprintsPath := c.findSubjackFingerprints()
+	if fingerprintsPath == "" {
+		// No fingerprints file found, subjack won't work
+		return vulns
+	}
+
+	args := []string{"-w", input, "-timeout", "30", "-ssl", "-v", "-c", fingerprintsPath}
 	if c.cfg.Threads > 0 {
 		args = append(args, "-t", fmt.Sprintf("%d", c.cfg.Threads))
 	}

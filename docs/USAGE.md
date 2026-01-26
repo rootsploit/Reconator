@@ -16,69 +16,106 @@ Complete usage documentation for Reconator.
 - [Notifications](#notifications)
 - [Output Structure](#output-structure)
 - [Command Reference](#command-reference)
+  - [scan](#reconator-scan)
+  - [webscan](#reconator-webscan)
+  - [report](#reconator-report)
+  - [export](#reconator-export)
+  - [install](#reconator-install)
+  - [check](#reconator-check)
+  - [monitor](#reconator-monitor)
+- [Examples](#examples)
 
 ---
 
 ## Scanning Pipeline
 
+Reconator executes phases in optimized parallel groups (levels) for maximum speed.
+
 ```mermaid
 flowchart TB
-    subgraph Phase0["🌐 Phase 0: Discovery"]
-        IP[IP/ASN Input] --> CIDR[CIDR Expansion]
-        CIDR --> RevDNS[Reverse DNS]
+    START([Start])
+
+    subgraph Level0["Level 0 - Entry Points"]
+        IP["[0] IP Range<br/><i>ASN/CIDR only</i>"] ~~~ SUB["[1] Subdomain<br/>Enumeration"] ~~~ HIST["[6] Historic<br/>URLs"]
     end
 
-    subgraph Phase1["🔍 Phase 1: Enumeration"]
-        SUB[Subdomain Enumeration<br/>30+ sources]
-        SUB --> |validated| SUBS[(Subdomains)]
+    subgraph Level1["Level 1 - Analysis"]
+        WAF["[2] WAF/CDN<br/>Detection"] ~~~ TAKE["[5] Subdomain<br/>Takeover"]
     end
 
-    subgraph ParallelA["⚡ Parallel Group A"]
-        WAF[WAF/CDN Detection]
-        TAKE[Takeover Check]
-        HIST[Historic URLs<br/>wayback + gau + katana]
-        OSINT[OSINT Dorks]
+    subgraph Level2["Level 2 - Port Discovery"]
+        PORTS["[3] Port Scan + TLS"]
     end
 
-    subgraph Phase3["🔌 Phase 3: Probing"]
-        PORTS[Port Scanning<br/>naabu + httpx]
-        PORTS --> ALIVE[(Live Hosts)]
+    subgraph Level3["Level 3 - Deep Analysis"]
+        TECH["[7] Tech<br/>Detection"] ~~~ DIR["[8] Directory<br/>Bruteforce"] ~~~ SCREEN["[10] Screenshot<br/>Capture"] ~~~ VHOST["[4] VHost<br/>Discovery"]
     end
 
-    subgraph ParallelB["⚡ Parallel Group B"]
-        TECH[Tech Detection<br/>wappalyzer]
-        DIR[Directory Brute<br/>feroxbuster]
-        GQL[GraphQL Detection<br/>16 paths]
+    subgraph Level4["Level 4 - Vulnerability Scan"]
+        VULN["[9] Vulnerability Scanning"]
     end
 
-    subgraph Phase8["🎯 Phase 8: Vulnerability Scan"]
-        NUCLEI[Nuclei CVE Scan]
-        XSS[XSS Testing<br/>dalfox]
-        SECRETS[Secret Detection<br/>50+ patterns]
-        CLOUD[Cloud Storage<br/>S3/GCS/Azure]
-        ADMIN[Admin Panels<br/>25+ paths]
+    subgraph Level5["Level 5 - AI Analysis"]
+        AI["[11] AI-Guided Scanning"]
     end
 
-    subgraph Phase9["🤖 Phase 9: AI Analysis"]
-        AI[AI-Guided Scanning<br/>GPT-4/Claude/Gemini]
-        CVEMAP[CVEMap Lookup]
-        REPORT[Attack Surface Report<br/>Risk Score 0-100]
-    end
+    DONE([Done])
 
-    subgraph Output["📊 Output"]
-        HTML[HTML Report]
-        JSON[JSON Results]
-        SCREEN[Screenshots]
-    end
-
-    Phase0 --> Phase1
-    Phase1 --> ParallelA
-    ParallelA --> Phase3
-    Phase3 --> ParallelB
-    ParallelB --> Phase8
-    Phase8 --> Phase9
-    Phase9 --> Output
+    START --> Level0
+    Level0 --> Level1
+    Level1 --> Level2
+    Level2 --> Level3
+    Level3 --> Level4
+    Level4 --> Level5
+    Level5 --> DONE
 ```
+
+### Phase Dependencies
+
+```mermaid
+flowchart LR
+    subgraph Independent["No Dependencies"]
+        HIST["[6] Historic"]
+    end
+
+    IP["[0] IPRange"] -->|TLDs for ASN| SUB["[1] Subdomain"]
+    SUB -->|subdomains| WAF["[2] WAF"]
+    SUB -->|subdomains| TAKE["[5] Takeover"]
+    SUB -->|subdomains| PORTS["[3] Ports"]
+
+    PORTS -->|alive hosts| TECH["[7] Tech"]
+    PORTS -->|alive hosts| DIR["[8] DirBrute"]
+    PORTS -->|alive hosts| SCREEN["[10] Screenshot"]
+    PORTS -->|IPs| VHOST["[4] VHost"]
+
+    TECH -->|tech data| VULN["[9] VulnScan"]
+    VULN -->|all findings| AI["[11] AIGuided"]
+```
+
+### Phase Details
+
+| Phase | Name | Tools | Output |
+|:-----:|------|-------|--------|
+| **0** | IP Range Discovery | asnmap, whois, hakip2host | IPs, TLDs |
+| **1** | Subdomain Enumeration | subfinder, assetfinder, findomain, puredns, alterx, mksub, dnsx, tlsx | Validated subdomains |
+| **2** | WAF/CDN Detection | cdncheck, hakoriginfinder | CDN hosts, direct hosts, origin IPs |
+| **3** | Port Scanning | naabu, tlsx | Open ports, TLS info, alive hosts |
+| **4** | VHost Discovery | ffuf, tlsx | Virtual hosts |
+| **5** | Subdomain Takeover | nuclei, subzy, subjack | Vulnerable takeovers |
+| **6** | Historic URLs | waybackurls, gau, waymore, urlfinder, uro, gf | URLs, JS files, params |
+| **7** | Tech Detection | httpx | Technologies, versions |
+| **8** | Directory Bruteforce | feroxbuster, gobuster, ffuf | Hidden paths, admin panels |
+| **9** | Vulnerability Scan | nuclei | Vulnerabilities by severity |
+| **10** | Screenshot Capture | gowitness | Screenshots, clusters |
+| **11** | AI-Guided Scanning | OpenAI/Claude/Gemini + nuclei | CVE analysis, attack chains |
+
+### Key Optimizations
+
+- **Level 0**: Historic runs parallel with Subdomain (no dependency)
+- **Level 1**: WAF + Takeover run parallel (both need subdomains, independent of each other)
+- **Level 3**: Tech + DirBrute + Screenshot + VHost run parallel (all need ports, independent)
+- **Tech-aware VulnScan**: Uses detected technologies to select relevant nuclei templates
+- **CDN filtering**: Non-CDN hosts get priority in vuln scanning (3x more vulns found)
 
 ---
 
@@ -446,6 +483,99 @@ results/target.com/
 ### `reconator check`
 
 Verifies all required tools are installed and working.
+
+### `reconator webscan`
+
+Run vulnerability scanning on a single URL (DAST mode).
+
+```bash
+# Basic single URL scan
+reconator webscan https://example.com
+
+# Deep scan with all nuclei templates
+reconator webscan https://api.example.com/v1 --deep
+
+# Fast mode (skip tech detection, run nuclei -as only)
+reconator webscan https://example.com --fast
+
+# Custom nuclei tags
+reconator webscan https://example.com --nuclei-tags "cve,rce,sqli"
+```
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--deep` | - | Deep scan with all nuclei templates | `false` |
+| `--fast` | - | Fast mode: skip tech detection, run nuclei -as only | `false` |
+| `--nuclei-tags` | - | Custom nuclei tags (comma-separated) | - |
+| `--nuclei-timeout` | - | Nuclei timeout in minutes | `10` (fast), `30` (deep) |
+| `--output` | `-o` | Output directory | `./results` |
+| `--threads` | `-c` | Concurrent threads (0=auto) | `0` |
+| `--screenshots` | - | Capture screenshots | `false` |
+| `--debug` | - | Show detailed timing logs | `false` |
+
+### `reconator report`
+
+Regenerate HTML report from existing scan results.
+
+```bash
+# Regenerate report for a target
+reconator report ./results/example.com
+
+# Regenerate for ASN scan results
+reconator report ./results/AS13335
+```
+
+Use this when you need to:
+- Recreate a deleted report
+- Generate a fresh report after manual data modifications
+- Fix a corrupted report file
+
+### `reconator export`
+
+Export scan results to various formats for integration with other tools.
+
+```bash
+# Export to all formats (CSV, JSON, Markdown)
+reconator export ./results/example.com
+
+# Export only CSV files
+reconator export ./results/example.com --format csv
+
+# Export structured JSON
+reconator export ./results/example.com --format json
+
+# Export Markdown summary
+reconator export ./results/example.com --format markdown
+```
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--format` | `-f` | Export format: csv, json, markdown, all | `all` |
+
+**Export Formats:**
+
+| Format | Output | Use Case |
+|--------|--------|----------|
+| `csv` | Multiple CSV files | Spreadsheet analysis, data processing |
+| `json` | Complete structured data | API integration, custom tooling |
+| `markdown` | Summary report | Documentation, sharing |
+| `all` | All formats | Comprehensive export |
+
+### `reconator monitor`
+
+Monitor scan progress in real-time.
+
+```bash
+reconator monitor ./results/example.com
+```
+
+### `reconator version`
+
+Display version information.
+
+```bash
+reconator version
+```
 
 ---
 

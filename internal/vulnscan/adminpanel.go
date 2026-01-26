@@ -203,7 +203,10 @@ func (r *AdminPanelResult) SaveAdminPanelResults(dir string) error {
 	data, _ := json.MarshalIndent(r, "", "  ")
 	os.WriteFile(filepath.Join(dir, "admin_panels.json"), data, 0644)
 
-	f, _ := os.Create(filepath.Join(dir, "admin_panels.txt"))
+	f, err := os.Create(filepath.Join(dir, "admin_panels.txt"))
+	if err != nil {
+		return err
+	}
 	defer f.Close()
 	for _, p := range r.Panels {
 		fmt.Fprintf(f, "[%d] %s (auth: %s, login: %v)\n", p.StatusCode, p.URL, p.AuthType, p.HasLogin)

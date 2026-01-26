@@ -13,11 +13,14 @@ import (
 	"github.com/rootsploit/reconator/internal/dirbrute"
 	"github.com/rootsploit/reconator/internal/historic"
 	"github.com/rootsploit/reconator/internal/iprange"
+	"github.com/rootsploit/reconator/internal/jsanalysis"
 	"github.com/rootsploit/reconator/internal/portscan"
 	"github.com/rootsploit/reconator/internal/screenshot"
+	"github.com/rootsploit/reconator/internal/secheaders"
 	"github.com/rootsploit/reconator/internal/subdomain"
 	"github.com/rootsploit/reconator/internal/takeover"
 	"github.com/rootsploit/reconator/internal/techdetect"
+	"github.com/rootsploit/reconator/internal/vhost"
 	"github.com/rootsploit/reconator/internal/vulnscan"
 	"github.com/rootsploit/reconator/internal/waf"
 )
@@ -35,6 +38,7 @@ type Data struct {
 	Subdomain  *subdomain.Result
 	WAF        *waf.Result
 	Ports      *portscan.Result
+	VHost      *vhost.Result
 	Takeover   *takeover.Result
 	Historic   *historic.Result
 	Tech       *techdetect.Result
@@ -43,6 +47,8 @@ type Data struct {
 	AIGuided   *aiguided.Result
 	IPRange    *iprange.Result
 	Screenshot *screenshot.Result
+	JSAnalysis *jsanalysis.Result
+	SecHeaders *secheaders.Result
 	OSINT      interface{}
 
 	// Computed per-subdomain details
@@ -88,6 +94,7 @@ type SubdomainDetail struct {
 	Ports        []int
 	Services     []ServiceInfo
 	Technologies []string
+	Versions     []string // Software versions (e.g., "Grafana v9.1.1", "NetBox v3.5.1")
 	Vulns        []VulnInfo
 	TakeoverRisk bool
 	TakeoverSvc  string
@@ -109,6 +116,8 @@ type ServiceInfo struct {
 	Port       int
 	Title      string
 	StatusCode int
+	WebServer  string // Web server (e.g., "nginx", "envoy")
+	TLS        bool   // True if HTTPS (port 443, 8443, etc.)
 }
 
 // VulnInfo holds vulnerability information for display
@@ -144,10 +153,14 @@ func aggregateSubdomainDetails(data *Data) []SubdomainDetail {
 		}
 		for host, svcs := range data.Ports.Services {
 			for _, svc := range svcs {
+				// Determine if TLS based on port
+				isTLS := svc.Port == 443 || svc.Port == 8443 || svc.Port == 9443 || svc.Port == 4443
 				servicesByHost[host] = append(servicesByHost[host], ServiceInfo{
 					Port:       svc.Port,
 					Title:      svc.Title,
 					StatusCode: svc.StatusCode,
+					WebServer:  svc.WebServer,
+					TLS:        isTLS,
 				})
 				// Capture IP, ASN, WebServer from first service with data
 				if svc.IP != "" && ipByHost[host] == "" {
@@ -175,9 +188,48 @@ func aggregateSubdomainDetails(data *Data) []SubdomainDetail {
 		}
 	}
 
+	// Normalize tech data - TechByHost keys may include ports (e.g., "app.example.com:443")
+	// We need to map by plain hostname for subdomain lookup
 	techByHost := make(map[string][]string)
+	versionsByHost := make(map[string][]string)
 	if data.Tech != nil {
-		techByHost = data.Tech.TechByHost
+		for hostWithPort, techs := range data.Tech.TechByHost {
+			// Extract plain hostname without port
+			host := extractHost(hostWithPort)
+			// Merge techs if we've seen this host before (different ports)
+			existing := techByHost[host]
+			for _, tech := range techs {
+				found := false
+				for _, e := range existing {
+					if e == tech {
+						found = true
+						break
+					}
+				}
+				if !found {
+					existing = append(existing, tech)
+				}
+			}
+			techByHost[host] = existing
+		}
+		// Also extract version info (footer/header versions like "Grafana v9.1.1")
+		for hostWithPort, versions := range data.Tech.VersionByHost {
+			host := extractHost(hostWithPort)
+			existing := versionsByHost[host]
+			for _, v := range versions {
+				found := false
+				for _, e := range existing {
+					if e == v {
+						found = true
+						break
+					}
+				}
+				if !found {
+					existing = append(existing, v)
+				}
+			}
+			versionsByHost[host] = existing
+		}
 	}
 
 	vulnsByHost := make(map[string][]VulnInfo)
@@ -224,6 +276,7 @@ func aggregateSubdomainDetails(data *Data) []SubdomainDetail {
 			Ports:        portsByHost[sub],
 			Services:     servicesByHost[sub],
 			Technologies: techByHost[sub],
+			Versions:     versionsByHost[sub],
 			Vulns:        vulnsByHost[sub],
 			WAFProtected: wafProtected[sub],
 			WAFName:      wafByHost[sub],
@@ -250,13 +303,17 @@ func aggregateSubdomainDetails(data *Data) []SubdomainDetail {
 		details = append(details, detail)
 	}
 
-	// Sort by interest: vulns first, then alive, then alphabetically
+	// Sort by: takeovers/vulns first for security, then by subdomain level (lower first), then alphabetically
+	// This ensures level 1 subdomains (api.example.com) appear before level 3 (dev.api.internal.example.com)
+	baseDomain := data.Subdomain.Domain
+	baseLabels := strings.Count(baseDomain, ".") + 1
+
 	sort.Slice(details, func(i, j int) bool {
-		// Takeover risks first
+		// Takeover risks first (security priority)
 		if details[i].TakeoverRisk != details[j].TakeoverRisk {
 			return details[i].TakeoverRisk
 		}
-		// Then by vulnerability count
+		// Then by vulnerability count (security priority)
 		if len(details[i].Vulns) != len(details[j].Vulns) {
 			return len(details[i].Vulns) > len(details[j].Vulns)
 		}
@@ -264,7 +321,13 @@ func aggregateSubdomainDetails(data *Data) []SubdomainDetail {
 		if details[i].IsAlive != details[j].IsAlive {
 			return details[i].IsAlive
 		}
-		// Then alphabetically
+		// Then by subdomain level (lower levels first - level 1 before level 3)
+		levelI := strings.Count(details[i].Name, ".") + 1 - baseLabels
+		levelJ := strings.Count(details[j].Name, ".") + 1 - baseLabels
+		if levelI != levelJ {
+			return levelI < levelJ
+		}
+		// Finally alphabetically within same level
 		return details[i].Name < details[j].Name
 	})
 
@@ -290,45 +353,74 @@ func loadScreenshotImages(data *Data, outputDir string) {
 		return
 	}
 
-	// Build cluster lookup
-	clusterLookup := make(map[string]string) // filepath -> cluster_id
+	// Build cluster lookup - use filename as key since paths may differ
+	clusterLookup := make(map[string]string) // filename -> cluster_id
 	clusterNames := make(map[string]string)  // cluster_id -> cluster_name
 	if data.Screenshot != nil {
 		for _, cluster := range data.Screenshot.Clusters {
 			clusterNames[cluster.ID] = cluster.Name
 			for _, fp := range cluster.Screenshots {
-				clusterLookup[fp] = cluster.ID
+				// Use just the filename for lookup (paths may differ between recon-box and local)
+				clusterLookup[filepath.Base(fp)] = cluster.ID
 			}
 		}
 	}
 
-	// Limit to first 100 screenshots to avoid huge HTML files
-	maxScreenshots := 100
+	// Limit to 500 screenshots to avoid huge HTML files
+	maxScreenshots := 500
 	count := 0
 
-	// Screenshot directory for resolving relative paths
-	screenshotDir := filepath.Join(outputDir, "screenshots")
+	// Try multiple screenshot directory names
+	screenshotDirs := []string{
+		filepath.Join(outputDir, "screenshots"),    // Primary location
+		filepath.Join(outputDir, "9-screenshots"),  // Pipeline naming
+	}
 
 	for _, ss := range data.Screenshot.Screenshots {
 		if count >= maxScreenshots {
 			break
 		}
 
-		// Try the file path as-is first, then try relative to screenshot dir
-		filePath := ss.FilePath
-		imgData, err := os.ReadFile(filePath)
-		if err != nil {
-			// Try relative to screenshot directory
-			filePath = filepath.Join(screenshotDir, filepath.Base(ss.FilePath))
-			imgData, err = os.ReadFile(filePath)
-			if err != nil {
-				// Try relative to output directory
-				filePath = filepath.Join(outputDir, ss.FilePath)
+		var imgData []byte
+		var err error
+		found := false
+		filename := filepath.Base(ss.FilePath)
+
+		// Strategy 1: Try the file path as-is (absolute path)
+		imgData, err = os.ReadFile(ss.FilePath)
+		if err == nil {
+			found = true
+		}
+
+		// Strategy 2: Try just the filename in screenshot directories
+		if !found {
+			for _, screenshotDir := range screenshotDirs {
+				filePath := filepath.Join(screenshotDir, filename)
 				imgData, err = os.ReadFile(filePath)
-				if err != nil {
-					continue
+				if err == nil {
+					found = true
+					break
 				}
 			}
+		}
+
+		// Strategy 3: Try stripping leading path components (handles results/target/screenshots/...)
+		if !found {
+			// Split path and try progressively shorter paths
+			parts := strings.Split(ss.FilePath, "/")
+			for i := range parts {
+				subPath := filepath.Join(parts[i:]...)
+				fullPath := filepath.Join(outputDir, subPath)
+				imgData, err = os.ReadFile(fullPath)
+				if err == nil {
+					found = true
+					break
+				}
+			}
+		}
+
+		if !found {
+			continue
 		}
 
 		// Determine MIME type from extension
@@ -342,11 +434,17 @@ func loadScreenshotImages(data *Data, outputDir string) {
 		b64 := base64.StdEncoding.EncodeToString(imgData)
 		dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType, b64)
 
-		clusterID := clusterLookup[ss.FilePath]
+		clusterID := clusterLookup[filename]
+
+		// Use full host with port for display (don't deduplicate)
+		displayHost := ss.Host
+		if displayHost == "" {
+			displayHost = extractHost(ss.URL)
+		}
 
 		data.ScreenshotImages = append(data.ScreenshotImages, ScreenshotImage{
 			URL:       ss.URL,
-			Host:      ss.Host,
+			Host:      displayHost,
 			DataURI:   template.URL(dataURI),
 			FilePath:  ss.FilePath,
 			ClusterID: clusterID,
@@ -409,6 +507,74 @@ func buildTechSummary(data *Data) []TechCount {
 	return summary
 }
 
+// severityOrder defines the sort order for vulnerabilities
+var severityOrder = map[string]int{
+	"critical": 0,
+	"high":     1,
+	"medium":   2,
+	"low":      3,
+	"info":     4,
+}
+
+// sortVulnerabilitiesBySeverity sorts vulnerabilities from critical to info
+func sortVulnerabilitiesBySeverity(data *Data) {
+	if data.VulnScan == nil || len(data.VulnScan.Vulnerabilities) == 0 {
+		return
+	}
+
+	sort.Slice(data.VulnScan.Vulnerabilities, func(i, j int) bool {
+		iOrder := severityOrder[strings.ToLower(data.VulnScan.Vulnerabilities[i].Severity)]
+		jOrder := severityOrder[strings.ToLower(data.VulnScan.Vulnerabilities[j].Severity)]
+		return iOrder < jOrder
+	})
+}
+
+// mergeSecHeadersAsVulnerabilities converts security header findings into vulnerabilities
+// and adds them to the VulnScan results for unified vulnerability view
+// All security header issues are marked as "low" severity
+func mergeSecHeadersAsVulnerabilities(data *Data) {
+	if data.SecHeaders == nil || len(data.SecHeaders.HeaderFindings) == 0 {
+		return
+	}
+
+	// Initialize VulnScan if nil
+	if data.VulnScan == nil {
+		data.VulnScan = &vulnscan.Result{
+			Vulnerabilities: []vulnscan.Vulnerability{},
+			BySeverity:      make(map[string]int),
+			ByType:          make(map[string]int),
+		}
+	}
+
+	for _, finding := range data.SecHeaders.HeaderFindings {
+		// Skip hosts with no missing headers
+		if len(finding.Missing) == 0 {
+			continue
+		}
+
+		// Build description of missing headers
+		var missingHeaders []string
+		for _, issue := range finding.Missing {
+			missingHeaders = append(missingHeaders, issue.Header)
+		}
+
+		vuln := vulnscan.Vulnerability{
+			Host:        finding.Host,
+			URL:         finding.URL,
+			TemplateID:  "security-headers-missing",
+			Name:        fmt.Sprintf("Missing Security Headers (%d)", len(finding.Missing)),
+			Severity:    "low",
+			Type:        "misconfiguration",
+			Description: fmt.Sprintf("Missing headers: %s", strings.Join(missingHeaders, ", ")),
+			Tool:        "httpx",
+		}
+
+		data.VulnScan.Vulnerabilities = append(data.VulnScan.Vulnerabilities, vuln)
+		data.VulnScan.BySeverity["low"]++
+		data.VulnScan.ByType["misconfiguration"]++
+	}
+}
+
 // Generate generates the HTML report
 func Generate(data *Data, outputDir string) error {
 	// Aggregate per-subdomain details
@@ -419,6 +585,12 @@ func Generate(data *Data, outputDir string) error {
 
 	// Build tech summary
 	data.TechSummary = buildTechSummary(data)
+
+	// Merge security header findings into vulnerabilities for unified view
+	mergeSecHeadersAsVulnerabilities(data)
+
+	// Sort vulnerabilities by severity (critical -> high -> medium -> low -> info)
+	sortVulnerabilitiesBySeverity(data)
 
 	const tpl = `
 <!DOCTYPE html>
@@ -904,6 +1076,16 @@ func Generate(data *Data, outputDir string) error {
 
         .data-table a:hover { text-decoration: underline; }
 
+        .table-host-link {
+            color: #93c5fd !important;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 0.8rem;
+        }
+
+        .table-host-link:hover {
+            color: #bfdbfe !important;
+        }
+
         /* Search & Filters */
         .controls {
             display: flex;
@@ -1012,9 +1194,9 @@ func Generate(data *Data, outputDir string) error {
             background: var(--bg-hover);
         }
 
-        .asset-row.has-vuln { border-left: 3px solid var(--critical); }
-        .asset-row.has-takeover { border-left: 3px solid var(--critical); background: linear-gradient(90deg, rgba(220, 38, 38, 0.15) 0%, var(--bg-card) 30%); }
-        .asset-row.alive { /* no border for alive rows */ }
+        .asset-row.has-vuln { /* removed left border */ }
+        .asset-row.has-takeover { background: linear-gradient(90deg, rgba(220, 38, 38, 0.08) 0%, var(--bg-card) 30%); }
+        .asset-row.alive { /* no special styling */ }
         .asset-row.dead { opacity: 0.5; }
 
         .asset-content {
@@ -1106,6 +1288,154 @@ func Generate(data *Data, outputDir string) error {
             font-family: monospace;
             color: var(--text-secondary);
         }
+
+        /* Inline Ports Section - Always visible */
+        .ports-section {
+            margin-top: 10px;
+            padding: 10px 12px;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+        .port-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .port-item:last-child {
+            border-bottom: none;
+            padding-bottom: 0;
+        }
+        .port-item:first-child {
+            padding-top: 0;
+        }
+        .port-url {
+            font-family: monospace;
+            font-size: 0.8rem;
+            color: var(--accent);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+        .port-url:hover {
+            color: var(--text-primary);
+            text-decoration: underline;
+        }
+        .port-url.https {
+            color: #22c55e;
+        }
+        .port-url.http {
+            color: #f59e0b;
+        }
+        .port-badges {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .port-server {
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            background: rgba(139, 92, 246, 0.2);
+            color: #a78bfa;
+            border-radius: 4px;
+            text-transform: uppercase;
+            font-weight: 500;
+        }
+        .port-title {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        /* Legacy support - remove toggle */
+        .ports-toggle {
+            display: none;
+        }
+        .ports-list {
+            display: none;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            text-decoration: none;
+        }
+        .port-link a:hover {
+            opacity: 0.9;
+        }
+
+        /* OSINT Section Styles */
+        .osint-tabs {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .osint-tab {
+            padding: 10px 20px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--bg-card);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s ease;
+        }
+
+        .osint-tab:hover {
+            background: var(--bg-hover);
+            border-color: var(--primary);
+        }
+
+        .osint-tab.active {
+            background: var(--primary);
+            color: white;
+            border-color: var(--primary);
+        }
+
+        .osint-stat-card {
+            background: var(--bg-secondary);
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+
+        .osint-stat-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            letter-spacing: 0.5px;
+        }
+
+        .osint-stat-value {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+
+        .osint-stat-detail {
+            margin-top: 8px;
+            font-size: 0.7rem;
+            color: #cbd5e1;
+            word-break: break-word;
+            overflow-wrap: break-word;
+            font-family: 'Monaco', 'Consolas', monospace;
+            background: rgba(15, 23, 42, 0.8);
+            padding: 10px 12px;
+            border-radius: 6px;
+            border: 1px solid rgba(71, 85, 105, 0.4);
+            max-height: 120px;
+            overflow-y: auto;
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+
+        .osint-status-ok { color: var(--success); }
+        .osint-status-warn { color: var(--warning); }
+        .osint-status-bad { color: var(--danger); }
+        .osint-status-na { color: var(--text-muted); }
 
         /* Screenshot Thumbnail on Right */
         .asset-screenshot {
@@ -1231,6 +1561,105 @@ func Generate(data *Data, outputDir string) error {
 
         .screenshot-url a:hover { color: var(--accent); }
 
+        /* Lightbox Modal */
+        .lightbox {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            z-index: 10000;
+            cursor: pointer;
+        }
+
+        .lightbox.active { display: flex; align-items: center; justify-content: center; }
+
+        .lightbox-content {
+            position: relative;
+            max-width: 90%;
+            max-height: 90%;
+        }
+
+        .lightbox-img {
+            max-width: 100%;
+            max-height: 85vh;
+            border-radius: 8px;
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+        }
+
+        .lightbox-info {
+            position: absolute;
+            bottom: -40px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .lightbox-close {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            font-size: 40px;
+            color: white;
+            cursor: pointer;
+            z-index: 10001;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+        }
+
+        .lightbox-close:hover { opacity: 1; }
+
+        .lightbox-nav {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 50px;
+            color: white;
+            cursor: pointer;
+            padding: 20px;
+            opacity: 0.5;
+            transition: opacity 0.2s;
+            user-select: none;
+        }
+
+        .lightbox-nav:hover { opacity: 1; }
+        .lightbox-prev { left: 20px; }
+        .lightbox-next { right: 20px; }
+
+        .lightbox-counter {
+            position: absolute;
+            top: 20px;
+            left: 30px;
+            color: white;
+            font-size: 1rem;
+            opacity: 0.7;
+        }
+
+        .screenshot-img {
+            cursor: zoom-in;
+        }
+
+        .screenshot-card .zoom-icon {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .screenshot-card:hover .zoom-icon { opacity: 1; }
+
+        .screenshot-card { position: relative; }
+
         /* Cluster View */
         .cluster-section {
             margin-bottom: 32px;
@@ -1258,31 +1687,191 @@ func Generate(data *Data, outputDir string) error {
             color: var(--text-secondary);
         }
 
-        /* Vulnerability Cards */
+        /* Vulnerability Cards - Expandable */
         .vuln-item {
             background: var(--bg-card);
             border: 1px solid var(--border);
             border-radius: 10px;
-            padding: 14px 18px;
             margin-bottom: 10px;
+            overflow: hidden;
+            transition: box-shadow 0.2s;
             border-left: 4px solid var(--border);
         }
 
-        .vuln-item.critical { border-left-color: var(--critical); }
-        .vuln-item.high { border-left-color: var(--high); }
-        .vuln-item.medium { border-left-color: var(--medium); }
-        .vuln-item.low { border-left-color: var(--low); }
+        .vuln-item:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.15); transform: translateX(2px); }
+        .vuln-item.critical { border-left-color: var(--critical); background: linear-gradient(90deg, rgba(220, 38, 38, 0.06) 0%, var(--bg-card) 15%); }
+        .vuln-item.high { border-left-color: var(--high); background: linear-gradient(90deg, rgba(234, 88, 12, 0.06) 0%, var(--bg-card) 15%); }
+        .vuln-item.medium { border-left-color: var(--medium); background: linear-gradient(90deg, rgba(202, 138, 4, 0.06) 0%, var(--bg-card) 15%); }
+        .vuln-item.low { border-left-color: var(--info); background: linear-gradient(90deg, rgba(59, 130, 246, 0.04) 0%, var(--bg-card) 15%); }
+        .vuln-item.info { border-left-color: var(--text-muted); }
+
+        /* Vulnerability Summary Stats */
+        .vuln-stats {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .vuln-stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            border-left: 3px solid var(--border);
+        }
+
+        .vuln-stat.critical { border-left-color: var(--critical); }
+        .vuln-stat.high { border-left-color: var(--high); }
+        .vuln-stat.medium { border-left-color: var(--medium); }
+        .vuln-stat.low { border-left-color: var(--info); }
+        .vuln-stat.info { border-left-color: var(--text-muted); }
+
+        .vuln-stat-count {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .vuln-stat-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
 
         .vuln-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 8px;
+            padding: 14px 18px;
+            cursor: pointer;
+            user-select: none;
         }
+
+        .vuln-header:hover { background: var(--bg-hover); }
+
+        .vuln-title-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex: 1;
+        }
+
+        .vuln-expand-icon {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            transition: transform 0.2s;
+            width: 12px;
+        }
+
+        .vuln-item.expanded .vuln-expand-icon { transform: rotate(90deg); }
 
         .vuln-name {
             font-weight: 600;
             font-size: 0.95rem;
+        }
+
+        .vuln-badges {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .vuln-summary {
+            padding: 0 18px 12px 18px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .vuln-summary span {
+            max-width: 500px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .vuln-summary .vuln-target-link {
+            color: var(--accent);
+            text-decoration: none;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 0.75rem;
+            max-width: 450px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            display: inline-block;
+        }
+
+        .vuln-summary .vuln-target-link:hover {
+            text-decoration: underline;
+        }
+
+        .vuln-summary a { color: var(--accent); text-decoration: none; }
+        .vuln-summary a:hover { text-decoration: underline; }
+
+        .vuln-type-badge {
+            background: var(--bg-secondary);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .vuln-details {
+            display: none;
+            padding: 0 18px 18px 18px;
+            border-top: 1px solid var(--border);
+            margin-top: 8px;
+        }
+
+        .vuln-item.expanded .vuln-details { display: block; }
+
+        .vuln-detail-section {
+            margin-bottom: 16px;
+        }
+
+        .vuln-detail-section:last-child { margin-bottom: 0; }
+
+        .vuln-detail-label {
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        .vuln-detail-value {
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            line-height: 1.5;
+        }
+
+        .vuln-detail-value a {
+            color: #93c5fd;
+            text-decoration: none;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 0.8rem;
+        }
+
+        .vuln-detail-value a:hover {
+            color: #bfdbfe;
+            text-decoration: underline;
+        }
+
+        .vuln-detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            padding-top: 12px;
         }
 
         .vuln-meta {
@@ -1543,31 +2132,32 @@ func Generate(data *Data, outputDir string) error {
                         <span>Subdomains</span>
                         <span class="badge">{{if .SubdomainDetails}}{{len .SubdomainDetails}}{{else}}0{{end}}</span>
                     </a>
-                    {{if .ScreenshotImages}}
                     <a class="nav-item" onclick="showSection('screenshots')">
                         <span class="icon">📸</span>
                         <span>Screenshots</span>
-                        <span class="badge">{{len .ScreenshotImages}}</span>
+                        <span class="badge">{{if .ScreenshotImages}}{{len .ScreenshotImages}}{{else}}0{{end}}</span>
                     </a>
-                    {{end}}
                 </div>
 
                 <div class="nav-section">
                     <div class="nav-section-title">Security</div>
-                    {{if .VulnScan}}{{if .VulnScan.Vulnerabilities}}
                     <a class="nav-item" onclick="showSection('vulnerabilities')">
                         <span class="icon">🔓</span>
                         <span>Vulnerabilities</span>
-                        <span class="badge critical">{{len .VulnScan.Vulnerabilities}}</span>
+                        <span class="badge{{if .VulnScan}}{{if .VulnScan.Vulnerabilities}} critical{{end}}{{end}}">{{if .VulnScan}}{{len .VulnScan.Vulnerabilities}}{{else}}0{{end}}</span>
                     </a>
-                    {{end}}{{end}}
-                    {{if .Takeover}}{{if .Takeover.Vulnerable}}
                     <a class="nav-item" onclick="showSection('takeovers')">
                         <span class="icon">⚠️</span>
                         <span>Takeovers</span>
-                        <span class="badge critical">{{len .Takeover.Vulnerable}}</span>
+                        <span class="badge{{if .Takeover}}{{if .Takeover.Vulnerable}} critical{{end}}{{end}}">{{if .Takeover}}{{len .Takeover.Vulnerable}}{{else}}0{{end}}</span>
                     </a>
-                    {{end}}{{end}}
+                    {{if .SecHeaders}}
+                    <a class="nav-item" onclick="showSection('osint')">
+                        <span class="icon">🔍</span>
+                        <span>OSINT</span>
+                        <span class="badge{{if .SecHeaders.HeaderFindings}} info{{end}}">{{len .SecHeaders.HeaderFindings}}</span>
+                    </a>
+                    {{end}}
                     {{if .AIGuided}}{{if .AIGuided.ChainAnalysis}}{{if .AIGuided.ChainAnalysis.Chains}}
                     <a class="nav-item" onclick="showSection('chains')">
                         <span class="icon">🔗</span>
@@ -1577,16 +2167,21 @@ func Generate(data *Data, outputDir string) error {
                     {{end}}{{end}}{{end}}
                 </div>
 
-                {{if .Tech}}
                 <div class="nav-section">
                     <div class="nav-section-title">Intelligence</div>
                     <a class="nav-item" onclick="showSection('technologies')">
                         <span class="icon">🔧</span>
                         <span>Technologies</span>
-                        <span class="badge">{{len .Tech.TechCount}}</span>
+                        <span class="badge">{{if .Tech}}{{len .Tech.TechCount}}{{else}}0{{end}}</span>
                     </a>
+                    {{if .JSAnalysis}}
+                    <a class="nav-item" onclick="showSection('jsanalysis')">
+                        <span class="icon">📜</span>
+                        <span>JS Analysis</span>
+                        <span class="badge{{if .JSAnalysis.TaintFlows}} warning{{end}}">{{len .JSAnalysis.TaintFlows}}</span>
+                    </a>
+                    {{end}}
                 </div>
-                {{end}}
             </nav>
         </aside>
 
@@ -1602,13 +2197,13 @@ func Generate(data *Data, outputDir string) error {
                 <div class="stats-grid">
                     <div class="stat-card accent" onclick="navigateToSection('assets')" style="cursor: pointer;">
                         <div class="label">🌐 Subdomains</div>
-                        <div class="value">{{if .Subdomain}}{{.Subdomain.TotalAll}}{{else}}0{{end}}</div>
-                        <div class="subtext">{{if .Subdomain}}{{.Subdomain.Total}} validated{{end}}</div>
+                        <div class="value">{{if .Subdomain}}{{.Subdomain.Total}}{{else}}0{{end}}</div>
+                        <div class="subtext">{{if .Ports}}{{.Ports.AliveCount}} alive{{else}}DNS validated{{end}}</div>
                     </div>
                     <div class="stat-card success" onclick="navigateToSectionWithFilter('assets', 'alive')" style="cursor: pointer;">
                         <div class="label">✓ Live Hosts</div>
-                        <div class="value">{{if .Ports}}{{len .Ports.AliveHosts}}{{else}}0{{end}}</div>
-                        <div class="subtext">{{if .Ports}}{{.Ports.TotalPorts}} open ports{{end}}</div>
+                        <div class="value">{{if .Ports}}{{.Ports.AliveCount}}{{else}}0{{end}}</div>
+                        <div class="subtext">{{if .Ports}}{{if gt .Ports.AliveCount 0}}{{.Ports.TotalPorts}} open ports{{end}}{{end}}</div>
                     </div>
                     <div class="stat-card critical" onclick="navigateToSection('vulnerabilities')" style="cursor: pointer;">
                         <div class="label">🔓 Vulnerabilities</div>
@@ -1633,6 +2228,42 @@ func Generate(data *Data, outputDir string) error {
                     </div>
                     {{end}}
                 </div>
+
+                {{if .AIGuided}}{{if .AIGuided.ExecutiveSummary}}
+                <div class="card" style="margin-bottom: 20px; border: 1px solid var(--accent);">
+                    <div class="card-header" style="background: linear-gradient(90deg, rgba(99, 102, 241, 0.1) 0%, transparent 100%);">
+                        <span class="card-title">AI Security Summary</span>
+                        {{if .AIGuided.AIProvider}}<span class="badge info">{{.AIGuided.AIProvider}}</span>{{end}}
+                    </div>
+                    <div class="card-body">
+                        <div style="margin-bottom: 16px;">
+                            <p style="font-size: 1rem; color: var(--text-primary); line-height: 1.6; margin: 0;">{{.AIGuided.ExecutiveSummary.OneLiner}}</p>
+                        </div>
+                        {{if .AIGuided.ExecutiveSummary.KeyFindings}}
+                        <div style="margin-bottom: 16px;">
+                            <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px;">Key Findings</div>
+                            <ul style="margin: 0; padding-left: 20px; color: var(--text-secondary); font-size: 0.875rem; line-height: 1.7;">
+                                {{range .AIGuided.ExecutiveSummary.KeyFindings}}<li>{{.}}</li>{{end}}
+                            </ul>
+                        </div>
+                        {{end}}
+                        {{if .AIGuided.ExecutiveSummary.ImmediateActions}}
+                        <div style="margin-bottom: 16px;">
+                            <div style="font-size: 0.85rem; font-weight: 600; color: var(--critical); margin-bottom: 8px;">Immediate Actions Required</div>
+                            <ul style="margin: 0; padding-left: 20px; font-size: 0.875rem; line-height: 1.7;">
+                                {{range .AIGuided.ExecutiveSummary.ImmediateActions}}<li style="color: var(--critical);">{{.}}</li>{{end}}
+                            </ul>
+                        </div>
+                        {{end}}
+                        {{if .AIGuided.ExecutiveSummary.RiskAssessment}}
+                        <div style="padding: 12px 16px; background: var(--bg-secondary); border-radius: 8px;">
+                            <div style="font-size: 0.75rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Risk Assessment</div>
+                            <p style="margin: 0; color: var(--text-primary); font-size: 0.875rem;">{{.AIGuided.ExecutiveSummary.RiskAssessment}}</p>
+                        </div>
+                        {{end}}
+                    </div>
+                </div>
+                {{end}}{{end}}
 
                 {{if .VulnScan}}{{if .VulnScan.Vulnerabilities}}
                 <div class="card" style="margin-bottom: 20px;">
@@ -1700,12 +2331,12 @@ func Generate(data *Data, outputDir string) error {
                                 </div>
                                 <div class="phase-stats">
                                     <div class="phase-stat">
-                                        <div class="phase-stat-value">{{.Subdomain.TotalAll}}</div>
-                                        <div class="phase-stat-label">Found</div>
+                                        <div class="phase-stat-value success">{{.Subdomain.Total}}</div>
+                                        <div class="phase-stat-label">Valid (DNSx)</div>
                                     </div>
                                     <div class="phase-stat">
-                                        <div class="phase-stat-value success">{{.Subdomain.Total}}</div>
-                                        <div class="phase-stat-label">Valid</div>
+                                        <div class="phase-stat-value">{{if .Ports}}{{.Ports.AliveCount}}{{else}}0{{end}}</div>
+                                        <div class="phase-stat-label">Alive (Httpx)</div>
                                     </div>
                                 </div>
                             </div>
@@ -1754,7 +2385,7 @@ func Generate(data *Data, outputDir string) error {
                                         <div class="phase-stat-label">Ports</div>
                                     </div>
                                     <div class="phase-stat">
-                                        <div class="phase-stat-value success">{{len .Ports.AliveHosts}}</div>
+                                        <div class="phase-stat-value success">{{.Ports.AliveCount}}</div>
                                         <div class="phase-stat-label">Live</div>
                                     </div>
                                 </div>
@@ -1880,42 +2511,6 @@ func Generate(data *Data, outputDir string) error {
                     </div>
                 </div>
 
-                {{if .AIGuided}}{{if .AIGuided.ExecutiveSummary}}
-                <div class="card" style="margin-bottom: 20px;">
-                    <div class="card-header">
-                        <span class="card-title">AI Security Analysis</span>
-                        {{if .AIGuided.AIProvider}}<span class="badge info">{{.AIGuided.AIProvider}}</span>{{end}}
-                    </div>
-                    <div class="card-body">
-                        <div style="margin-bottom: 16px;">
-                            <p style="font-size: 1rem; color: var(--text-primary); line-height: 1.6; margin: 0;">{{.AIGuided.ExecutiveSummary.OneLiner}}</p>
-                        </div>
-                        {{if .AIGuided.ExecutiveSummary.KeyFindings}}
-                        <div style="margin-bottom: 16px;">
-                            <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px;">Key Findings</div>
-                            <ul style="margin: 0; padding-left: 20px; color: var(--text-secondary); font-size: 0.875rem; line-height: 1.7;">
-                                {{range .AIGuided.ExecutiveSummary.KeyFindings}}<li>{{.}}</li>{{end}}
-                            </ul>
-                        </div>
-                        {{end}}
-                        {{if .AIGuided.ExecutiveSummary.ImmediateActions}}
-                        <div style="margin-bottom: 16px;">
-                            <div style="font-size: 0.85rem; font-weight: 600; color: var(--critical); margin-bottom: 8px;">Immediate Actions Required</div>
-                            <ul style="margin: 0; padding-left: 20px; color: var(--text-secondary); font-size: 0.875rem; line-height: 1.7;">
-                                {{range .AIGuided.ExecutiveSummary.ImmediateActions}}<li style="color: var(--critical);">{{.}}</li>{{end}}
-                            </ul>
-                        </div>
-                        {{end}}
-                        {{if .AIGuided.ExecutiveSummary.RiskAssessment}}
-                        <div style="padding: 12px 16px; background: var(--bg-secondary); border-radius: 8px; border-left: 3px solid var(--accent);">
-                            <div style="font-size: 0.75rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Risk Assessment</div>
-                            <p style="margin: 0; color: var(--text-primary); font-size: 0.875rem;">{{.AIGuided.ExecutiveSummary.RiskAssessment}}</p>
-                        </div>
-                        {{end}}
-                    </div>
-                </div>
-                {{end}}{{end}}
-
                 {{if .TechSummary}}
                 <div class="card">
                     <div class="card-header">Technology Distribution</div>
@@ -1999,46 +2594,58 @@ func Generate(data *Data, outputDir string) error {
                 </div>
 
                 <div class="asset-list" id="assetList">
-                    {{range .SubdomainDetails}}
-                    <div class="asset-row {{if .TakeoverRisk}}has-takeover{{else if .Vulns}}has-vuln{{else if .IsAlive}}alive{{else}}dead{{end}}"
-                         data-name="{{.Name}}"
-                         data-alive="{{.IsAlive}}"
-                         data-vulns="{{len .Vulns}}"
-                         data-takeover="{{.TakeoverRisk}}"
-                         data-waf="{{.WAFProtected}}"
-                         data-ports="{{range $i, $p := .Ports}}{{if $i}},{{end}}{{$p}}{{end}}"
-                         data-techs="{{range $i, $t := .Technologies}}{{if $i}},{{end}}{{$t}}{{end}}"
-                         data-ip="{{.IPAddress}}"
-                         data-asn="{{.ASN}}">
+                    {{range $idx, $sub := .SubdomainDetails}}
+                    <div class="asset-row {{if $sub.TakeoverRisk}}has-takeover{{else if $sub.Vulns}}has-vuln{{else if $sub.IsAlive}}alive{{else}}dead{{end}}"
+                         data-name="{{$sub.Name}}"
+                         data-alive="{{$sub.IsAlive}}"
+                         data-vulns="{{len $sub.Vulns}}"
+                         data-takeover="{{$sub.TakeoverRisk}}"
+                         data-waf="{{$sub.WAFProtected}}"
+                         data-ports="{{range $i, $p := $sub.Ports}}{{if $i}},{{end}}{{$p}}{{end}}"
+                         data-techs="{{range $i, $t := $sub.Technologies}}{{if $i}},{{end}}{{$t}}{{end}}"
+                         data-ip="{{$sub.IPAddress}}"
+                         data-asn="{{$sub.ASN}}">
                         <div class="asset-content">
                             <div class="asset-header">
-                                <span class="status-dot {{if .TakeoverRisk}}takeover{{else if .Vulns}}vuln{{else if .IsAlive}}alive{{else}}dead{{end}}"></span>
-                                <a class="asset-name" href="https://{{.Name}}" target="_blank">{{.Name}}{{if .Ports}}:{{index .Ports 0}}{{end}}</a>
+                                <span class="status-dot {{if $sub.TakeoverRisk}}takeover{{else if $sub.Vulns}}vuln{{else if $sub.IsAlive}}alive{{else}}dead{{end}}"></span>
+                                <a class="asset-name" href="https://{{$sub.Name}}" target="_blank">{{$sub.Name}}</a>
                                 <div class="asset-badges">
-                                    {{if .TakeoverRisk}}<span class="badge takeover">Takeover</span>{{end}}
-                                    {{if .Vulns}}<span class="badge critical">{{len .Vulns}} Vulns</span>{{end}}
-                                    {{if .WAFProtected}}<span class="badge waf">{{.WAFName}}</span>{{end}}
+                                    {{if $sub.TakeoverRisk}}<span class="badge takeover">Takeover</span>{{end}}
+                                    {{if $sub.Vulns}}<span class="badge critical">{{len $sub.Vulns}} Vulns</span>{{end}}
+                                    {{if $sub.WAFProtected}}<span class="badge waf">{{$sub.WAFName}}</span>{{end}}
                                 </div>
                             </div>
                             <div class="asset-meta">
-                                {{if .StatusCode}}<span class="meta-item"><span class="badge {{if eq .StatusCode 200}}success{{else if lt .StatusCode 400}}info{{else if lt .StatusCode 500}}medium{{else}}critical{{end}}">{{.StatusCode}}</span></span>{{end}}
-                                {{if .ASN}}<span class="meta-item"><span class="badge info">{{.ASN}}</span></span>{{end}}
-                                {{if .IPAddress}}<span class="meta-item"><span class="badge tech">{{.IPAddress}}</span></span>{{end}}
-                                {{if .Ports}}{{if gt (len .Ports) 1}}<span class="meta-item"><span class="badge info">+{{sub (len .Ports) 1}}</span></span>{{end}}{{end}}
+                                {{if $sub.StatusCode}}<span class="meta-item"><span class="badge {{if eq $sub.StatusCode 200}}success{{else if lt $sub.StatusCode 400}}info{{else if lt $sub.StatusCode 500}}medium{{else}}critical{{end}}">{{$sub.StatusCode}}</span></span>{{end}}
+                                {{if $sub.ASN}}<span class="meta-item"><span class="badge info">{{$sub.ASN}}</span></span>{{end}}
+                                {{if $sub.IPAddress}}<span class="meta-item"><span class="badge tech">{{$sub.IPAddress}}</span></span>{{end}}
                             </div>
                             <div class="asset-meta" style="margin-top: 6px;">
-                                {{if .SSLIssuer}}<span class="meta-item">{{if .SSLExpired}}<span class="badge critical">SSL Expired</span>{{else if and .SSLDaysLeft (lt .SSLDaysLeft 30)}}<span class="badge medium">SSL {{.SSLDaysLeft}}d</span>{{else if .SSLDaysLeft}}<span class="badge success">SSL {{.SSLDaysLeft}}d</span>{{end}} <span class="badge tech">{{.SSLIssuer}}</span></span>{{end}}
-                                {{if .WebServer}}<span class="meta-item"><span class="badge tech">{{.WebServer}}</span></span>{{end}}
-                                {{if .TakeoverRisk}}<span class="meta-item"><span class="badge takeover">{{.TakeoverSvc}}</span></span>{{end}}
+                                {{if $sub.SSLIssuer}}<span class="meta-item">{{if $sub.SSLExpired}}<span class="badge critical">SSL Expired</span>{{else if and $sub.SSLDaysLeft (lt $sub.SSLDaysLeft 30)}}<span class="badge medium">SSL {{$sub.SSLDaysLeft}}d</span>{{else if $sub.SSLDaysLeft}}<span class="badge success">SSL {{$sub.SSLDaysLeft}}d</span>{{end}} <span class="badge tech">{{$sub.SSLIssuer}}</span></span>{{end}}
+                                {{if $sub.TakeoverRisk}}<span class="meta-item"><span class="badge takeover">{{$sub.TakeoverSvc}}</span></span>{{end}}
                             </div>
-                            {{if .Technologies}}
-                            <div class="tech-tags">
-                                {{range .Technologies}}<span class="tech-tag">{{.}}</span>{{end}}
+                            {{if $sub.Services}}
+                            <div class="ports-section">
+                                {{range $sub.Services}}
+                                <div class="port-item">
+                                    <a class="port-url {{if .TLS}}https{{else}}http{{end}}" href="{{if .TLS}}https{{else}}http{{end}}://{{$sub.Name}}:{{.Port}}" target="_blank">{{if .TLS}}https{{else}}http{{end}}://{{$sub.Name}}:{{.Port}}</a>
+                                    <div class="port-badges">
+                                        {{if .StatusCode}}<span class="badge {{if eq .StatusCode 200}}success{{else if lt .StatusCode 400}}info{{else if lt .StatusCode 500}}medium{{else}}critical{{end}}">{{.StatusCode}}</span>{{end}}
+                                        {{if .WebServer}}<span class="port-server">{{.WebServer}}</span>{{end}}
+                                        {{if .Title}}<span class="port-title" title="{{.Title}}">{{.Title}}</span>{{end}}
+                                    </div>
+                                </div>
+                                {{end}}
                             </div>
                             {{end}}
-                            {{if .Vulns}}
+                            {{if $sub.Technologies}}
+                            <div class="tech-tags">
+                                {{range $sub.Technologies}}<span class="tech-tag">{{.}}</span>{{end}}
+                            </div>
+                            {{end}}
+                            {{if $sub.Vulns}}
                             <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);">
-                                {{range .Vulns}}
+                                {{range $sub.Vulns}}
                                 <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 0.75rem;">
                                     <span class="badge {{.Severity}}">{{.Severity}}</span>
                                     <span style="color: var(--text-secondary);">{{.Name}}</span>
@@ -2047,7 +2654,7 @@ func Generate(data *Data, outputDir string) error {
                             </div>
                             {{end}}
                         </div>
-                        <div class="asset-screenshot" data-host="{{.Name}}">
+                        <div class="asset-screenshot" data-host="{{$sub.Name}}">
                             <span class="no-screenshot">No screenshot</span>
                         </div>
                     </div>
@@ -2062,13 +2669,13 @@ func Generate(data *Data, outputDir string) error {
             </section>
 
             <!-- Screenshots Section -->
-            {{if .ScreenshotImages}}
             <section class="section" id="screenshots">
                 <div class="section-header">
                     <h1 class="section-title">Screenshots</h1>
-                    <p class="section-subtitle">{{len .ScreenshotImages}} captured web applications</p>
+                    <p class="section-subtitle">{{if .ScreenshotImages}}{{len .ScreenshotImages}} captured web applications{{else}}No screenshots captured{{end}}</p>
                 </div>
 
+                {{if .ScreenshotImages}}
                 <div class="controls">
                     <div class="filter-group">
                         <button class="filter-btn active" onclick="setGalleryView('grid', this)">Grid</button>
@@ -2079,14 +2686,13 @@ func Generate(data *Data, outputDir string) error {
 
                 <div id="gridView">
                     <div class="screenshot-grid" id="screenshotGrid">
-                        {{range .ScreenshotImages}}
-                        <div class="screenshot-card" data-host="{{.Host}}" data-url="{{.URL}}">
-                            <a href="{{.DataURI}}" target="_blank">
-                                <img class="screenshot-img" src="{{.DataURI}}" alt="{{.Host}}" loading="lazy">
-                            </a>
+                        {{range $index, $img := .ScreenshotImages}}
+                        <div class="screenshot-card" data-host="{{$img.Host}}" data-url="{{$img.URL}}" data-index="{{$index}}">
+                            <span class="zoom-icon">🔍 Click to enlarge</span>
+                            <img class="screenshot-img" src="{{$img.DataURI}}" alt="{{$img.Host}}" loading="lazy" onclick="openLightbox({{$index}})">
                             <div class="screenshot-info">
-                                <div class="screenshot-host">{{.Host}}</div>
-                                <div class="screenshot-url"><a href="{{.URL}}" target="_blank">{{.URL}}</a></div>
+                                <div class="screenshot-host">{{$img.Host}}</div>
+                                <div class="screenshot-url"><a href="{{$img.URL}}" target="_blank" onclick="event.stopPropagation()">{{$img.URL}}</a></div>
                             </div>
                         </div>
                         {{end}}
@@ -2103,12 +2709,11 @@ func Generate(data *Data, outputDir string) error {
                         <div class="screenshot-grid">
                             {{range .Screenshots}}
                             <div class="screenshot-card" data-host="{{.Host}}" data-url="{{.URL}}">
-                                <a href="{{.DataURI}}" target="_blank">
-                                    <img class="screenshot-img" src="{{.DataURI}}" alt="{{.Host}}" loading="lazy">
-                                </a>
+                                <span class="zoom-icon">🔍 Click to enlarge</span>
+                                <img class="screenshot-img" src="{{.DataURI}}" alt="{{.Host}}" loading="lazy" onclick="openLightboxByUrl('{{.DataURI}}', '{{.Host}}', '{{.URL}}')">
                                 <div class="screenshot-info">
                                     <div class="screenshot-host">{{.Host}}</div>
-                                    <div class="screenshot-url"><a href="{{.URL}}" target="_blank">{{.URL}}</a></div>
+                                    <div class="screenshot-url"><a href="{{.URL}}" target="_blank" onclick="event.stopPropagation()">{{.URL}}</a></div>
                                 </div>
                             </div>
                             {{end}}
@@ -2116,15 +2721,32 @@ func Generate(data *Data, outputDir string) error {
                     </div>
                     {{end}}
                 </div>
+                {{else}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">📸</span>
+                        <p style="margin-top: 16px;">No screenshots have been captured yet.</p>
+                        <p style="font-size: 0.875rem;">Screenshots are captured during the port scanning phase when live hosts are discovered.</p>
+                    </div>
+                </div>
+                {{end}}
             </section>
-            {{end}}
 
             <!-- Vulnerabilities Section -->
-            {{if .VulnScan}}{{if .VulnScan.Vulnerabilities}}
             <section class="section" id="vulnerabilities">
                 <div class="section-header">
                     <h1 class="section-title">Vulnerabilities</h1>
-                    <p class="section-subtitle">{{len .VulnScan.Vulnerabilities}} security issues identified</p>
+                    <p class="section-subtitle">{{if .VulnScan}}{{len .VulnScan.Vulnerabilities}} security issues identified{{else}}No vulnerabilities scanned{{end}}</p>
+                </div>
+
+                {{if .VulnScan}}{{if .VulnScan.Vulnerabilities}}
+                <!-- Severity Summary Stats -->
+                <div class="vuln-stats">
+                    {{if index .VulnScan.BySeverity "critical"}}<div class="vuln-stat critical"><span class="vuln-stat-count">{{index .VulnScan.BySeverity "critical"}}</span><span class="vuln-stat-label">Critical</span></div>{{end}}
+                    {{if index .VulnScan.BySeverity "high"}}<div class="vuln-stat high"><span class="vuln-stat-count">{{index .VulnScan.BySeverity "high"}}</span><span class="vuln-stat-label">High</span></div>{{end}}
+                    {{if index .VulnScan.BySeverity "medium"}}<div class="vuln-stat medium"><span class="vuln-stat-count">{{index .VulnScan.BySeverity "medium"}}</span><span class="vuln-stat-label">Medium</span></div>{{end}}
+                    {{if index .VulnScan.BySeverity "low"}}<div class="vuln-stat low"><span class="vuln-stat-count">{{index .VulnScan.BySeverity "low"}}</span><span class="vuln-stat-label">Low</span></div>{{end}}
+                    {{if index .VulnScan.BySeverity "info"}}<div class="vuln-stat info"><span class="vuln-stat-count">{{index .VulnScan.BySeverity "info"}}</span><span class="vuln-stat-label">Info</span></div>{{end}}
                 </div>
 
                 <div class="controls">
@@ -2135,35 +2757,91 @@ func Generate(data *Data, outputDir string) error {
                         <button class="filter-btn" onclick="setVulnFilter('high', this)">High</button>
                         <button class="filter-btn" onclick="setVulnFilter('medium', this)">Medium</button>
                         <button class="filter-btn" onclick="setVulnFilter('low', this)">Low</button>
+                        <button class="filter-btn" onclick="setVulnFilter('info', this)">Info</button>
                     </div>
                 </div>
 
                 <div class="vuln-list" id="vulnList">
                     {{range .VulnScan.Vulnerabilities}}
-                    <div class="vuln-item {{.Severity}}" data-severity="{{.Severity}}" data-name="{{.Name}}" data-host="{{.Host}}">
+                    <div class="vuln-item {{.Severity}}" data-severity="{{.Severity}}" data-name="{{.Name}}" data-host="{{if .URL}}{{.URL}}{{else}}{{.Host}}{{end}}" onclick="toggleVuln(this)">
                         <div class="vuln-header">
-                            <span class="vuln-name">{{.Name}}</span>
-                            <span class="badge {{.Severity}}">{{.Severity}}</span>
+                            <div class="vuln-title-row">
+                                <span class="vuln-expand-icon">▶</span>
+                                <span class="vuln-name">{{.Name}}</span>
+                            </div>
+                            <div class="vuln-badges">
+                                <span class="badge {{.Severity}}">{{.Severity}}</span>
+                                {{if .Tool}}<span class="badge info" style="font-size: 0.7rem;">{{.Tool}}</span>{{end}}
+                            </div>
                         </div>
-                        <div class="vuln-meta">
-                            <span>Host: <a href="{{.Host}}" target="_blank">{{.Host}}</a></span>
-                            <span>Type: {{.Type}}</span>
-                            {{if .MatcherName}}<span>Matcher: {{.MatcherName}}</span>{{end}}
+                        <div class="vuln-summary">
+                            {{if .URL}}<a href="{{.URL}}" target="_blank" class="vuln-target-link" onclick="event.stopPropagation()" title="{{.URL}}">{{.URL}}</a>
+                            {{else if .Host}}<a href="https://{{.Host}}" target="_blank" class="vuln-target-link" onclick="event.stopPropagation()" title="{{.Host}}">{{.Host}}</a>{{end}}
+                            <span class="vuln-type-badge">{{.Type}}</span>
+                        </div>
+                        <div class="vuln-details">
+                            <div class="vuln-detail-grid">
+                                <div class="vuln-detail-section">
+                                    <div class="vuln-detail-label">Target</div>
+                                    <div class="vuln-detail-value">
+                                        {{if .URL}}<a href="{{.URL}}" target="_blank" onclick="event.stopPropagation()">{{.URL}}</a>
+                                        {{else if .Host}}<a href="https://{{.Host}}" target="_blank" onclick="event.stopPropagation()">{{.Host}}</a>{{end}}
+                                    </div>
+                                </div>
+                                <div class="vuln-detail-section">
+                                    <div class="vuln-detail-label">Type</div>
+                                    <div class="vuln-detail-value">{{.Type}}</div>
+                                </div>
+                                {{if .TemplateID}}
+                                <div class="vuln-detail-section">
+                                    <div class="vuln-detail-label">Template ID</div>
+                                    <div class="vuln-detail-value">{{.TemplateID}}</div>
+                                </div>
+                                {{end}}
+                                {{if .Matcher}}
+                                <div class="vuln-detail-section">
+                                    <div class="vuln-detail-label">Matcher</div>
+                                    <div class="vuln-detail-value">{{.Matcher}}</div>
+                                </div>
+                                {{end}}
+                            </div>
+                            {{if .Description}}
+                            <div class="vuln-detail-section" style="margin-top: 16px;">
+                                <div class="vuln-detail-label">Description</div>
+                                <div class="vuln-detail-value">{{.Description}}</div>
+                            </div>
+                            {{end}}
                         </div>
                     </div>
                     {{end}}
                 </div>
+                {{else}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">✅</span>
+                        <p style="margin-top: 16px;">No vulnerabilities detected.</p>
+                        <p style="font-size: 0.875rem;">Vulnerability scanning completed with no findings.</p>
+                    </div>
+                </div>
+                {{end}}{{else}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">🔓</span>
+                        <p style="margin-top: 16px;">Vulnerability scanning not yet performed.</p>
+                        <p style="font-size: 0.875rem;">Run a full scan to detect security issues using Nuclei templates.</p>
+                    </div>
+                </div>
+                {{end}}
             </section>
-            {{end}}{{end}}
 
             <!-- Takeovers Section -->
-            {{if .Takeover}}{{if .Takeover.Vulnerable}}
             <section class="section" id="takeovers">
                 <div class="section-header">
                     <h1 class="section-title">Subdomain Takeovers</h1>
-                    <p class="section-subtitle">{{len .Takeover.Vulnerable}} vulnerable subdomains</p>
+                    <p class="section-subtitle">{{if .Takeover}}{{len .Takeover.Vulnerable}} vulnerable subdomains{{else}}No takeover scan performed{{end}}</p>
                 </div>
 
+                {{if .Takeover}}{{if .Takeover.Vulnerable}}
                 <div class="card">
                     <div class="card-body" style="padding: 0;">
                         <table class="data-table">
@@ -2188,8 +2866,223 @@ func Generate(data *Data, outputDir string) error {
                         </table>
                     </div>
                 </div>
+                {{else}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">✅</span>
+                        <p style="margin-top: 16px;">No subdomain takeover vulnerabilities found.</p>
+                        <p style="font-size: 0.875rem;">All subdomains appear to be properly configured.</p>
+                    </div>
+                </div>
+                {{end}}{{else}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">⚠️</span>
+                        <p style="margin-top: 16px;">Takeover scanning not yet performed.</p>
+                        <p style="font-size: 0.875rem;">Run a full scan to check for subdomain takeover vulnerabilities.</p>
+                    </div>
+                </div>
+                {{end}}
             </section>
-            {{end}}{{end}}
+
+            <!-- OSINT Section -->
+            {{if .SecHeaders}}
+            <section class="section" id="osint">
+                <div class="section-header">
+                    <h1 class="section-title">OSINT & Security Analysis</h1>
+                    <p class="section-subtitle">Email security, DNS security, and HTTP security header findings</p>
+                </div>
+
+                <!-- OSINT Category Tabs -->
+                <div class="osint-tabs" style="display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap;">
+                    <button class="osint-tab active" onclick="showOsintTab('email')">📧 Email Security</button>
+                    <button class="osint-tab" onclick="showOsintTab('dns')">🌐 DNS Security</button>
+                    <button class="osint-tab" onclick="showOsintTab('http')">🛡️ HTTP Headers</button>
+                </div>
+
+                <!-- Email Security Tab -->
+                <div class="osint-content" id="osint-email">
+                {{if .SecHeaders.EmailSecurity}}
+                <div class="card" style="margin-bottom: 24px;">
+                    <div class="card-header">
+                        <span class="card-title">📧 Email Security (SPF/DKIM/DMARC)</span>
+                        <span class="badge info" style="margin-left: auto;">DNS Records</span>
+                    </div>
+                    <div class="card-body">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">SPF Record</div>
+                                <div class="osint-stat-value">
+                                    {{if .SecHeaders.EmailSecurity.SPF}}{{if .SecHeaders.EmailSecurity.SPF.Found}}<span class="osint-status-ok">✓ Present</span>{{else}}<span class="osint-status-bad">✗ Missing</span>{{end}}{{else}}<span class="osint-status-na">Not checked</span>{{end}}
+                                </div>
+                                {{if .SecHeaders.EmailSecurity.SPF}}{{if .SecHeaders.EmailSecurity.SPF.Record}}<div class="osint-stat-detail">{{.SecHeaders.EmailSecurity.SPF.Record}}</div>{{end}}{{end}}
+                            </div>
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">DKIM Record</div>
+                                <div class="osint-stat-value">
+                                    {{if .SecHeaders.EmailSecurity.DKIM}}{{if .SecHeaders.EmailSecurity.DKIM.Found}}<span class="osint-status-ok">✓ Present</span>{{else}}<span class="osint-status-warn">⚠ Not Found</span>{{end}}{{else}}<span class="osint-status-na">Not checked</span>{{end}}
+                                </div>
+                                {{if .SecHeaders.EmailSecurity.DKIM}}
+                                <div class="osint-stat-detail">{{if .SecHeaders.EmailSecurity.DKIM.Found}}DKIM configured (selectors: {{range $i, $s := .SecHeaders.EmailSecurity.DKIM.Selectors}}{{if $i}}, {{end}}{{$s}}{{end}}){{else}}Checked selectors: google, default, selector1, selector2{{end}}</div>
+                                {{end}}
+                            </div>
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">DMARC Record</div>
+                                <div class="osint-stat-value">
+                                    {{if .SecHeaders.EmailSecurity.DMARC}}{{if .SecHeaders.EmailSecurity.DMARC.Found}}<span class="osint-status-ok">✓ Present</span>{{else}}<span class="osint-status-bad">✗ Missing</span>{{end}}{{else}}<span class="osint-status-na">Not checked</span>{{end}}
+                                </div>
+                                {{if .SecHeaders.EmailSecurity.DMARC}}{{if .SecHeaders.EmailSecurity.DMARC.Record}}<div class="osint-stat-detail">{{.SecHeaders.EmailSecurity.DMARC.Record}}</div>{{end}}{{end}}
+                            </div>
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">Security Score</div>
+                                <div class="osint-stat-value osint-score">
+                                    {{if ge .SecHeaders.EmailSecurity.Score 80}}<span class="osint-status-ok">{{.SecHeaders.EmailSecurity.Score}}/100</span>
+                                    {{else if ge .SecHeaders.EmailSecurity.Score 50}}<span class="osint-status-warn">{{.SecHeaders.EmailSecurity.Score}}/100</span>
+                                    {{else}}<span class="osint-status-bad">{{.SecHeaders.EmailSecurity.Score}}/100</span>{{end}}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {{else}}
+                <div class="card" style="margin-bottom: 24px;">
+                    <div class="card-body" style="text-align: center; padding: 48px; color: var(--text-muted);">
+                        <div style="font-size: 2rem; margin-bottom: 12px;">📧</div>
+                        <div>Email security checks not performed for this scan</div>
+                    </div>
+                </div>
+                {{end}}
+                </div>
+
+                <!-- DNS Security Tab -->
+                <div class="osint-content" id="osint-dns" style="display: none;">
+                <div class="card" style="margin-bottom: 24px;">
+                    <div class="card-header">
+                        <span class="card-title">🌐 DNS Security Analysis</span>
+                        <span class="badge info" style="margin-left: auto;">DNS Records</span>
+                    </div>
+                    <div class="card-body">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">CAA Records</div>
+                                <div class="osint-stat-value">
+                                    <span class="osint-status-na">Not yet implemented</span>
+                                </div>
+                                <div class="osint-stat-detail">Controls which CAs can issue certificates for this domain</div>
+                            </div>
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">DNSSEC</div>
+                                <div class="osint-stat-value">
+                                    <span class="osint-status-na">Not yet implemented</span>
+                                </div>
+                                <div class="osint-stat-detail">Cryptographic signing of DNS records</div>
+                            </div>
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">Zone Transfer (AXFR)</div>
+                                <div class="osint-stat-value">
+                                    <span class="osint-status-na">Not yet implemented</span>
+                                </div>
+                                <div class="osint-stat-detail">Checks if DNS zone transfer is allowed</div>
+                            </div>
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">NS Records</div>
+                                <div class="osint-stat-value">
+                                    <span class="osint-status-na">Not yet implemented</span>
+                                </div>
+                                <div class="osint-stat-detail">Nameserver configuration and diversity</div>
+                            </div>
+                        </div>
+                        <div style="margin-top: 16px; padding: 12px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; font-size: 0.85rem; color: var(--text-secondary);">
+                            <strong>ℹ️ Coming Soon:</strong> DNS security tests (CAA, DNSSEC, AXFR, NS analysis) are planned for future releases. See dev-docs/tracking/OSINT_DNS_TESTS.md for implementation details.
+                        </div>
+                    </div>
+                </div>
+                </div>
+
+                <!-- HTTP Headers Tab -->
+                <div class="osint-content" id="osint-http" style="display: none;">
+
+                {{if .SecHeaders.HeaderFindings}}
+                <div class="controls">
+                    <input type="text" class="search-input" placeholder="Search by host or header..." id="secheaderSearch" onkeyup="filterSecHeaders()">
+                </div>
+
+                <div class="card">
+                    <div class="card-body" style="padding: 0; max-height: 600px; overflow-y: auto;">
+                        <table class="data-table" id="secheaderTable">
+                            <thead>
+                                <tr>
+                                    <th>Host</th>
+                                    <th>Missing Headers</th>
+                                    <th>Weak Configs</th>
+                                    <th>Risk Level</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .SecHeaders.HeaderFindings}}
+                                <tr data-host="{{.Host}}" data-missing="{{range .Missing}}{{.Header}} {{end}}">
+                                    <td><a href="{{.URL}}" target="_blank" class="table-host-link">{{.Host}}</a></td>
+                                    <td>
+                                        {{range .Missing}}
+                                        <span class="badge warning" style="margin: 2px; font-size: 0.7rem;">{{.Header}}</span>
+                                        {{end}}
+                                        {{if not .Missing}}<span style="color: var(--text-muted);">None</span>{{end}}
+                                    </td>
+                                    <td>
+                                        {{range .Weak}}
+                                        <span class="badge medium" style="margin: 2px; font-size: 0.7rem;" title="{{.Value}}">{{.Header}}</span>
+                                        {{end}}
+                                        {{if not .Weak}}<span style="color: var(--text-muted);">None</span>{{end}}
+                                    </td>
+                                    <td>
+                                        {{$total := len .Missing}}{{$weak := len .Weak}}
+                                        {{if or (gt $total 0) (gt $weak 0)}}<span class="badge low">Low</span>
+                                        {{else}}<span class="badge success">OK</span>{{end}}
+                                    </td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Common Missing Headers Summary -->
+                <div class="card" style="margin-top: 24px;">
+                    <div class="card-header">
+                        <span class="card-title">Recommendations</span>
+                    </div>
+                    <div class="card-body">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">
+                            <div style="padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                                <div style="font-weight: 600; margin-bottom: 8px;">X-Frame-Options</div>
+                                <div style="font-size: 0.85rem; color: var(--text-muted);">Prevents clickjacking attacks. Add: <code>X-Frame-Options: DENY</code> or <code>SAMEORIGIN</code></div>
+                            </div>
+                            <div style="padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                                <div style="font-weight: 600; margin-bottom: 8px;">Content-Security-Policy</div>
+                                <div style="font-size: 0.85rem; color: var(--text-muted);">Prevents XSS and injection attacks. Define trusted content sources.</div>
+                            </div>
+                            <div style="padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                                <div style="font-weight: 600; margin-bottom: 8px;">Strict-Transport-Security</div>
+                                <div style="font-size: 0.85rem; color: var(--text-muted);">Forces HTTPS. Add: <code>Strict-Transport-Security: max-age=31536000; includeSubDomains</code></div>
+                            </div>
+                            <div style="padding: 12px; background: var(--bg-secondary); border-radius: 8px;">
+                                <div style="font-weight: 600; margin-bottom: 8px;">X-Content-Type-Options</div>
+                                <div style="font-size: 0.85rem; color: var(--text-muted);">Prevents MIME sniffing. Add: <code>X-Content-Type-Options: nosniff</code></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {{else}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">✅</span>
+                        <p style="margin-top: 16px;">All HTTP security headers properly configured.</p>
+                    </div>
+                </div>
+                {{end}}
+                </div><!-- End osint-http -->
+            </section>
+            {{end}}
 
             <!-- Attack Chains Section -->
             {{if .AIGuided}}{{if .AIGuided.ChainAnalysis}}{{if .AIGuided.ChainAnalysis.Chains}}
@@ -2254,13 +3147,13 @@ func Generate(data *Data, outputDir string) error {
             {{end}}{{end}}{{end}}
 
             <!-- Technologies Section -->
-            {{if .Tech}}
             <section class="section" id="technologies">
                 <div class="section-header">
                     <h1 class="section-title">Technologies</h1>
-                    <p class="section-subtitle">{{.Tech.Total}} detections across {{len .Tech.TechCount}} technologies</p>
+                    <p class="section-subtitle">{{if .Tech}}{{.Tech.Total}} detections across {{len .Tech.TechCount}} technologies{{else}}No technology detection performed{{end}}</p>
                 </div>
 
+                {{if .Tech}}
                 <div class="card">
                     <div class="card-header">Technology Stack</div>
                     <div class="card-body">
@@ -2283,6 +3176,181 @@ func Generate(data *Data, outputDir string) error {
                         </div>
                     </div>
                 </div>
+                {{else}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">🔧</span>
+                        <p style="margin-top: 16px;">Technology detection not yet performed.</p>
+                        <p style="font-size: 0.875rem;">Run a full scan to identify web technologies and frameworks.</p>
+                    </div>
+                </div>
+                {{end}}
+            </section>
+
+            <!-- JavaScript Analysis Section -->
+            {{if .JSAnalysis}}
+            <section class="section" id="jsanalysis">
+                <div class="section-header">
+                    <h1 class="section-title">JavaScript Analysis</h1>
+                    <p class="section-subtitle">{{.JSAnalysis.FilesScanned}} files analyzed · {{len .JSAnalysis.Endpoints}} endpoints · {{len .JSAnalysis.TaintFlows}} potential DOM XSS flows</p>
+                </div>
+
+                <!-- Taint Flows (Most Important) -->
+                {{if .JSAnalysis.TaintFlows}}
+                <div class="card" style="margin-bottom: 24px;">
+                    <div class="card-header">Potential DOM XSS Vulnerabilities</div>
+                    <div class="card-body" style="padding: 0;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Severity</th>
+                                    <th>Source</th>
+                                    <th>Sink</th>
+                                    <th>File</th>
+                                    <th>Description</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .JSAnalysis.TaintFlows}}
+                                <tr class="vuln-row" data-severity="{{.Severity}}">
+                                    <td><span class="severity-badge {{.Severity}}">{{.Severity}}</span></td>
+                                    <td><code>{{.SourceType}}</code> (line {{.SourceLine}})</td>
+                                    <td><code>{{.SinkType}}</code> (line {{.SinkLine}})</td>
+                                    <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.File}}">{{.File}}</td>
+                                    <td>{{.Description}}</td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {{end}}
+
+                <!-- DOM XSS Sources -->
+                {{if .JSAnalysis.DOMXSSSources}}
+                <div class="card" style="margin-bottom: 24px;">
+                    <div class="card-header">User-Controllable Sources ({{len .JSAnalysis.DOMXSSSources}})</div>
+                    <div class="card-body" style="padding: 0; max-height: 400px; overflow-y: auto;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Type</th>
+                                    <th>Category</th>
+                                    <th>Control</th>
+                                    <th>File</th>
+                                    <th>Line</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .JSAnalysis.DOMXSSSources}}
+                                <tr>
+                                    <td><code>{{.Type}}</code></td>
+                                    <td><span class="tag">{{.Category}}</span></td>
+                                    <td>{{if eq .Controllability "full"}}<span style="color: var(--critical);">Full</span>{{else}}<span style="color: var(--warning);">Partial</span>{{end}}</td>
+                                    <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}">{{.Source}}</td>
+                                    <td>{{.Line}}</td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {{end}}
+
+                <!-- DOM XSS Sinks -->
+                {{if .JSAnalysis.DOMXSSSinks}}
+                <div class="card" style="margin-bottom: 24px;">
+                    <div class="card-header">Dangerous Sinks ({{len .JSAnalysis.DOMXSSSinks}})</div>
+                    <div class="card-body" style="padding: 0; max-height: 400px; overflow-y: auto;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Severity</th>
+                                    <th>Sink Type</th>
+                                    <th>Has Input</th>
+                                    <th>File</th>
+                                    <th>Line</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .JSAnalysis.DOMXSSSinks}}
+                                <tr>
+                                    <td><span class="severity-badge {{.Severity}}">{{.Severity}}</span></td>
+                                    <td><code>{{.Type}}</code></td>
+                                    <td>{{if .HasInput}}<span style="color: var(--critical);">Yes</span>{{else}}<span style="color: var(--text-muted);">No</span>{{end}}</td>
+                                    <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}">{{.Source}}</td>
+                                    <td>{{.Line}}</td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {{end}}
+
+                <!-- Extracted Endpoints -->
+                {{if .JSAnalysis.Endpoints}}
+                <div class="card" style="margin-bottom: 24px;">
+                    <div class="card-header">Extracted Endpoints ({{len .JSAnalysis.Endpoints}})</div>
+                    <div class="card-body" style="padding: 0; max-height: 400px; overflow-y: auto;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Path</th>
+                                    <th>Sensitive</th>
+                                    <th>Source File</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .JSAnalysis.Endpoints}}
+                                <tr>
+                                    <td><code>{{.Path}}</code></td>
+                                    <td>{{if .Sensitive}}<span style="color: var(--warning);">Yes</span>{{else}}<span style="color: var(--text-muted);">No</span>{{end}}</td>
+                                    <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}">{{.Source}}</td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {{end}}
+
+                <!-- Secrets -->
+                {{if .JSAnalysis.Secrets}}
+                <div class="card">
+                    <div class="card-header">Potential Secrets ({{len .JSAnalysis.Secrets}})</div>
+                    <div class="card-body" style="padding: 0;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Type</th>
+                                    <th>Value (Masked)</th>
+                                    <th>Source File</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {{range .JSAnalysis.Secrets}}
+                                <tr>
+                                    <td><span class="tag">{{.Type}}</span></td>
+                                    <td><code>{{.Value}}</code></td>
+                                    <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}">{{.Source}}</td>
+                                </tr>
+                                {{end}}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {{end}}
+
+                {{if and (not .JSAnalysis.TaintFlows) (not .JSAnalysis.DOMXSSSinks) (not .JSAnalysis.Endpoints)}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">📜</span>
+                        <p style="margin-top: 16px;">No significant JavaScript findings.</p>
+                        <p style="font-size: 0.875rem;">JavaScript analysis completed but no DOM XSS patterns or endpoints were detected.</p>
+                    </div>
+                </div>
+                {{end}}
             </section>
             {{end}}
 
@@ -2346,6 +3414,17 @@ func Generate(data *Data, outputDir string) error {
             const filterBtn = document.querySelector('#vulnerabilities .filter-btn[onclick*="' + severity + '"]');
             if (filterBtn) filterBtn.classList.add('active');
             filterVulns();
+        }
+
+        // Toggle expandable ports list
+        function togglePorts(element, event) {
+            event.stopPropagation();
+            const targetId = element.dataset.target;
+            const portsList = document.getElementById(targetId);
+            if (portsList) {
+                portsList.classList.toggle('show');
+                element.classList.toggle('expanded');
+            }
         }
 
         // Asset Filtering
@@ -2505,6 +3584,10 @@ func Generate(data *Data, outputDir string) error {
             });
         }
 
+        function toggleVuln(el) {
+            el.classList.toggle('expanded');
+        }
+
         // Screenshot Gallery
         function setGalleryView(view, btn) {
             document.querySelectorAll('#screenshots .filter-group .filter-btn').forEach(p => p.classList.remove('active'));
@@ -2521,7 +3604,96 @@ func Generate(data *Data, outputDir string) error {
                 card.style.display = (host.includes(search) || url.includes(search)) ? 'block' : 'none';
             });
         }
+
+        // OSINT Tab switching
+        function showOsintTab(tab) {
+            // Hide all content
+            document.querySelectorAll('.osint-content').forEach(el => el.style.display = 'none');
+            // Remove active from all tabs
+            document.querySelectorAll('.osint-tab').forEach(el => el.classList.remove('active'));
+            // Show selected content
+            const content = document.getElementById('osint-' + tab);
+            if (content) content.style.display = 'block';
+            // Set active tab
+            event.target.classList.add('active');
+        }
+
+        function filterSecHeaders() {
+            const search = document.getElementById('secheaderSearch').value.toLowerCase();
+            document.querySelectorAll('#secheaderTable tbody tr').forEach(row => {
+                const host = (row.dataset.host || '').toLowerCase();
+                const missing = (row.dataset.missing || '').toLowerCase();
+                row.style.display = (host.includes(search) || missing.includes(search)) ? '' : 'none';
+            });
+        }
+
+        // Lightbox functionality
+        const screenshotData = [
+            {{range .ScreenshotImages}}
+            { src: "{{.DataURI}}", host: "{{.Host}}", url: "{{.URL}}" },
+            {{end}}
+        ];
+        let currentLightboxIndex = 0;
+
+        function openLightbox(index) {
+            currentLightboxIndex = index;
+            const data = screenshotData[index];
+            if (!data) return;
+
+            document.getElementById('lightboxImg').src = data.src;
+            document.getElementById('lightboxHost').textContent = data.host;
+            document.getElementById('lightboxUrl').href = data.url;
+            document.getElementById('lightboxUrl').textContent = data.url;
+            document.getElementById('lightboxCounter').textContent = (index + 1) + ' / ' + screenshotData.length;
+            document.getElementById('lightbox').classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function openLightboxByUrl(src, host, url) {
+            document.getElementById('lightboxImg').src = src;
+            document.getElementById('lightboxHost').textContent = host;
+            document.getElementById('lightboxUrl').href = url;
+            document.getElementById('lightboxUrl').textContent = url;
+            document.getElementById('lightboxCounter').textContent = '';
+            document.getElementById('lightbox').classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeLightbox() {
+            document.getElementById('lightbox').classList.remove('active');
+            document.body.style.overflow = '';
+        }
+
+        function navigateLightbox(direction) {
+            if (screenshotData.length === 0) return;
+            currentLightboxIndex = (currentLightboxIndex + direction + screenshotData.length) % screenshotData.length;
+            openLightbox(currentLightboxIndex);
+        }
+
+        // Keyboard navigation
+        document.addEventListener('keydown', function(e) {
+            const lb = document.getElementById('lightbox');
+            if (!lb || !lb.classList.contains('active')) return;
+            if (e.key === 'Escape') closeLightbox();
+            if (e.key === 'ArrowLeft') navigateLightbox(-1);
+            if (e.key === 'ArrowRight') navigateLightbox(1);
+        });
     </script>
+
+    <!-- Lightbox Modal -->
+    <div id="lightbox" class="lightbox" onclick="if(event.target===this)closeLightbox()">
+        <span class="lightbox-close" onclick="closeLightbox()">&times;</span>
+        <span class="lightbox-counter" id="lightboxCounter"></span>
+        <span class="lightbox-nav lightbox-prev" onclick="event.stopPropagation();navigateLightbox(-1)">&#10094;</span>
+        <div class="lightbox-content" onclick="event.stopPropagation()">
+            <img id="lightboxImg" class="lightbox-img" src="" alt="Screenshot">
+            <div class="lightbox-info">
+                <strong id="lightboxHost"></strong><br>
+                <a id="lightboxUrl" href="" target="_blank" style="color: var(--accent);"></a>
+            </div>
+        </div>
+        <span class="lightbox-nav lightbox-next" onclick="event.stopPropagation();navigateLightbox(1)">&#10095;</span>
+    </div>
 </body>
 </html>
 `

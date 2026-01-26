@@ -323,7 +323,10 @@ func (r *CloudStorageResult) SaveCloudStorageResults(dir string) error {
 	os.WriteFile(filepath.Join(dir, "cloud_storage.json"), data, 0644)
 
 	// Save open buckets to separate file
-	f, _ := os.Create(filepath.Join(dir, "open_buckets.txt"))
+	f, err := os.Create(filepath.Join(dir, "open_buckets.txt"))
+	if err != nil {
+		return err
+	}
 	defer f.Close()
 	for _, b := range r.Buckets {
 		if b.Status == "open" {

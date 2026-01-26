@@ -2,9 +2,15 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/rootsploit/reconator/internal/aiguided"
 	"github.com/rootsploit/reconator/internal/runner"
+	"github.com/rootsploit/reconator/internal/tools"
+	"github.com/rootsploit/reconator/internal/vulnscan"
 	"github.com/spf13/cobra"
 )
 
@@ -147,6 +153,11 @@ func runScan(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Check if target is a URL (for single-target DAST mode)
+	if isURL(cfg.Target) && isSinglePhaseVulnScan(cfg.Phases) {
+		return runSingleURLScan(cfg.Target)
+	}
+
 	// Use legacy runner if requested, otherwise use pipeline (default)
 	if useLegacy {
 		r := runner.New(&cfg)
@@ -156,4 +167,70 @@ func runScan(cmd *cobra.Command, args []string) error {
 	// Pipeline runner is the default (parallel phases, resumable)
 	pr := runner.NewPipelineRunner(&cfg)
 	return pr.Run()
+}
+
+// isURL checks if the target is a full URL (http:// or https://)
+func isURL(target string) bool {
+	return strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://")
+}
+
+// isSinglePhaseVulnScan checks if only vulnscan phase is requested
+func isSinglePhaseVulnScan(phases []string) bool {
+	if len(phases) == 1 && phases[0] == "vulnscan" {
+		return true
+	}
+	return false
+}
+
+// runSingleURLScan runs vulnerability scanning on a single URL (DAST mode)
+func runSingleURLScan(targetURL string) error {
+	fmt.Println("\n[*] Single URL DAST Mode")
+	fmt.Printf("    Target: %s\n\n", targetURL)
+
+	start := time.Now()
+
+	// Create output directory for results
+	outputDir := cfg.OutputDir
+	if outputDir == "" {
+		outputDir = "./results"
+	}
+	// Extract hostname for subdirectory
+	hostname := strings.TrimPrefix(targetURL, "https://")
+	hostname = strings.TrimPrefix(hostname, "http://")
+	hostname = strings.Split(hostname, "/")[0]
+	hostname = strings.Split(hostname, ":")[0]
+
+	scanDir := filepath.Join(outputDir, hostname)
+	if err := os.MkdirAll(scanDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Initialize tools checker
+	checker := tools.NewChecker()
+
+	// Run vulnerability scanner
+	fmt.Println("[*] Running vulnerability scanner...")
+	scanner := vulnscan.NewScanner(&cfg, checker)
+	result, err := scanner.Scan([]string{targetURL}, nil)
+	if err != nil {
+		fmt.Printf("    Error: %v\n", err)
+	}
+
+	// Print results
+	if result != nil && len(result.Vulnerabilities) > 0 {
+		fmt.Printf("\n[+] Found %d vulnerabilities:\n\n", len(result.Vulnerabilities))
+		for _, v := range result.Vulnerabilities {
+			fmt.Printf("    [%s] %s\n", strings.ToUpper(v.Severity), v.Name)
+			fmt.Printf("        URL: %s\n", v.URL)
+			if v.Description != "" {
+				fmt.Printf("        Description: %s\n", v.Description)
+			}
+			fmt.Println()
+		}
+	} else {
+		fmt.Println("\n[*] No vulnerabilities found")
+	}
+
+	fmt.Printf("\n[*] Scan completed in %s\n", time.Since(start).Round(time.Second))
+	return nil
 }

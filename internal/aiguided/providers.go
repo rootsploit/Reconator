@@ -232,40 +232,30 @@ func (pm *ProviderManager) QueryRaw(prompt string) (string, ProviderType, error)
 		return "", "", fmt.Errorf("no AI providers configured")
 	}
 
-	var lastErr error
-	triedProviders := make(map[ProviderType]bool)
-	currentProvider := providers[0]
+	var errors []string
 
-	for {
-		if triedProviders[currentProvider] {
-			break
-		}
-		triedProviders[currentProvider] = true
-
-		response, err := pm.queryProviderRaw(currentProvider, prompt)
+	// Try all available providers in order
+	for _, provider := range providers {
+		response, err := pm.queryProviderRaw(provider, prompt)
 		if err == nil {
-			return response, currentProvider, nil
+			return response, provider, nil
 		}
 
-		lastErr = err
+		errors = append(errors, fmt.Sprintf("%s: %v", provider, err))
 
+		// Try key rotation on rate limit
 		if isRateLimitError(err) {
-			if pm.rotateKey(currentProvider) {
-				response, err := pm.queryProviderRaw(currentProvider, prompt)
+			if pm.rotateKey(provider) {
+				response, err := pm.queryProviderRaw(provider, prompt)
 				if err == nil {
-					return response, currentProvider, nil
+					return response, provider, nil
 				}
+				errors = append(errors, fmt.Sprintf("%s (retry): %v", provider, err))
 			}
 		}
-
-		fallback := pm.getFallback(currentProvider)
-		if fallback == "" {
-			break
-		}
-		currentProvider = fallback
 	}
 
-	return "", "", fmt.Errorf("all AI providers failed: %w", lastErr)
+	return "", "", fmt.Errorf("all AI providers failed: %s", strings.Join(errors, "; "))
 }
 
 // queryProviderRaw queries a provider and returns raw response
@@ -283,16 +273,21 @@ func (pm *ProviderManager) queryProviderRaw(provider ProviderType, prompt string
 		return "", fmt.Errorf("provider %s not configured", provider)
 	}
 
-	keyIdx := pm.keyIndex[provider]
-	if keyIdx >= len(providerCfg.Keys) {
-		keyIdx = 0
+	// Get API key (Ollama doesn't need one)
+	var apiKey string
+	if len(providerCfg.Keys) > 0 {
+		keyIdx := pm.keyIndex[provider]
+		if keyIdx >= len(providerCfg.Keys) {
+			keyIdx = 0
+		}
+		apiKey = providerCfg.Keys[keyIdx]
 	}
-	apiKey := providerCfg.Keys[keyIdx]
 	model := providerCfg.Model
 	endpoint := providerCfg.Endpoint
 	pm.mu.RUnlock()
 
-	if pm.isKeyRateLimited(apiKey) {
+	// Skip rate limit check for Ollama (no key) or if key is empty
+	if apiKey != "" && pm.isKeyRateLimited(apiKey) {
 		return "", fmt.Errorf("key is rate limited")
 	}
 

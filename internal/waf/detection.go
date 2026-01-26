@@ -64,9 +64,14 @@ func (d *Detector) Detect(hosts []string) (*Result, error) {
 	}
 	defer cleanup()
 
-	r := exec.Run("cdncheck", []string{"-i", tmp, "-j", "-silent"}, &exec.Options{Timeout: 5 * time.Minute})
+	r := exec.Run("cdncheck", []string{"-i", tmp, "-j", "-silent", "-c", "100"}, &exec.Options{Timeout: 10 * time.Minute})
 	if r.Error != nil {
-		return nil, r.Error
+		// cdncheck failed - return partial result with all hosts as "unknown/direct"
+		// This ensures the phase completes and 2-waf folder is created
+		fmt.Printf("    [!] cdncheck failed: %v, marking all hosts as direct (unknown CDN status)\n", r.Error)
+		result.DirectHosts = hosts
+		result.Duration = time.Since(start)
+		return result, nil // Return result instead of error for graceful degradation
 	}
 
 	checked := make(map[string]bool)
@@ -170,9 +175,10 @@ func (d *Detector) discoverOriginIPs(hosts []string) map[string]string {
 	}
 
 	// Fallback to hakoriginfinder (doesn't need API keys)
+	// Usage: hakoriginfinder -h hosts.txt
 	if len(origins) < len(hosts) && d.c.IsInstalled("hakoriginfinder") {
 		fmt.Println("        Running hakoriginfinder...")
-		r := exec.Run("hakoriginfinder", []string{"-f", tmp}, &exec.Options{Timeout: 3 * time.Minute})
+		r := exec.Run("hakoriginfinder", []string{"-h", tmp}, &exec.Options{Timeout: 3 * time.Minute})
 		if r.Error == nil {
 			for _, line := range exec.Lines(r.Stdout) {
 				// Parse hakoriginfinder output

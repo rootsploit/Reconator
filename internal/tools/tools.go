@@ -26,10 +26,11 @@ func GoTools() []Tool {
 		// Note: github-subdomains removed - subfinder with GitHub API keys handles this
 
 		// IP range to domain discovery
-		{"hakrevdns", "hakrevdns", "github.com/hakluke/hakrevdns@latest", false}, // Reverse DNS from IPs
-		{"hakip2host", "hakip2host", "github.com/hakluke/hakip2host@latest", false}, // IP to hostname via multiple checks
+		{"hakrevdns", "hakrevdns", "github.com/hakluke/hakrevdns@latest", false},                // Reverse DNS from IPs
+		{"hakip2host", "hakip2host", "github.com/hakluke/hakip2host@latest", false},             // IP to hostname via multiple checks
 		{"mapcidr", "mapcidr", "github.com/projectdiscovery/mapcidr/cmd/mapcidr@latest", false}, // CIDR expansion
-		{"asnmap", "asnmap", "github.com/projectdiscovery/asnmap/cmd/asnmap@latest", false}, // ASN to CIDR/domain discovery
+		{"asnmap", "asnmap", "github.com/projectdiscovery/asnmap/cmd/asnmap@latest", false},     // ASN to CIDR/domain discovery
+		{"CloudRecon", "CloudRecon", "github.com/g0ldencybersec/CloudRecon@latest", false},      // SSL cert recon on cloud IP ranges
 
 		// Favicon reconnaissance
 		{"favirecon", "favirecon", "github.com/edoardottt/favirecon/cmd/favirecon@latest", false}, // Favicon hash recon
@@ -58,7 +59,7 @@ func GoTools() []Tool {
 
 		// Vulnerability scanning
 		{"nuclei", "nuclei", "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest", true},
-		{"cvemap", "cvemap", "github.com/projectdiscovery/cvemap/cmd/cvemap@latest", false}, // CVE lookup by technology
+		{"vulnx", "vulnx", "github.com/projectdiscovery/cvemap/cmd/vulnx@latest", false}, // CVE lookup by technology (next-gen cvemap)
 
 		// Historic URLs
 		{"waybackurls", "waybackurls", "github.com/tomnomnom/waybackurls@latest", true},
@@ -72,13 +73,17 @@ func GoTools() []Tool {
 		// Takeover
 		{"subzy", "subzy", "github.com/PentestPad/subzy@latest", false},
 		{"subjack", "subjack", "github.com/haccer/subjack@latest", false},
+		{"dnstake", "dnstake", "github.com/pwnesia/dnstake/cmd/dnstake@latest", false}, // DNS takeover detection
+
+		// CRLF Injection
+		{"crlfuzz", "crlfuzz", "github.com/dwisiswant0/crlfuzz/cmd/crlfuzz@latest", false}, // CRLF injection scanning
 
 		// Directory bruteforce
-		{"feroxbuster", "feroxbuster", "", false}, // Install via package manager or GitHub releases
+		{"feroxbuster", "feroxbuster", "", true}, // Install via package manager or GitHub releases (REQUIRED)
 
-		// URL analysis
-		{"gf", "gf", "github.com/tomnomnom/gf@latest", false},           // Pattern matching
-		{"qsreplace", "qsreplace", "github.com/tomnomnom/qsreplace@latest", false}, // Query string replace
+		// URL analysis & quick testing (BB-8)
+		{"gf", "gf", "github.com/tomnomnom/gf@latest", false},                      // Pattern matching
+		{"qsreplace", "qsreplace", "github.com/tomnomnom/qsreplace@latest", false}, // Query string replace for payload injection
 
 		// XSS scanning
 		{"dalfox", "dalfox", "github.com/hahwul/dalfox/v2@latest", false},
@@ -103,14 +108,15 @@ func PythonTools() []Tool {
 	return []Tool{
 		{"waymore", "waymore", "waymore", false},
 		{"xnLinkFinder", "xnLinkFinder", "xnLinkFinder", false}, // Endpoint/parameter extraction
+		{"uro", "uro", "uro", false},                            // BB-7: URL deduplication (84% reduction)
 	}
 }
 
-// RustTools - optional Rust tools (installed via GitHub releases or cargo)
+// RustTools - Rust tools (installed via GitHub releases or cargo)
 func RustTools() []Tool {
 	return []Tool{
 		// vita is not available as a binary - removed
-		{"findomain", "findomain", "", false},     // GitHub releases only
-		{"feroxbuster", "feroxbuster", "", false}, // GitHub releases or package manager
+		{"findomain", "findomain", "", false},    // GitHub releases only
+		{"feroxbuster", "feroxbuster", "", true}, // GitHub releases or package manager (REQUIRED)
 	}
 }

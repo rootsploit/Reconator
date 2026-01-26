@@ -7,10 +7,53 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/rootsploit/reconator/internal/debug"
 )
+
+// processManager tracks all running child processes for cleanup
+var (
+	runningProcesses = make(map[int]*exec.Cmd)
+	processMu        sync.Mutex
+)
+
+// trackProcess adds a process to the tracking map
+func trackProcess(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		processMu.Lock()
+		runningProcesses[cmd.Process.Pid] = cmd
+		processMu.Unlock()
+	}
+}
+
+// untrackProcess removes a process from the tracking map
+func untrackProcess(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		processMu.Lock()
+		delete(runningProcesses, cmd.Process.Pid)
+		processMu.Unlock()
+	}
+}
+
+// KillAllProcesses terminates all tracked child processes and their process groups
+func KillAllProcesses() {
+	processMu.Lock()
+	defer processMu.Unlock()
+
+	for pid, cmd := range runningProcesses {
+		if cmd.Process != nil {
+			// Kill the entire process group (negative PID)
+			syscall.Kill(-pid, syscall.SIGKILL)
+			// Also try to kill the process directly
+			cmd.Process.Kill()
+		}
+	}
+	// Clear the map
+	runningProcesses = make(map[int]*exec.Cmd)
+}
 
 type Result struct {
 	Stdout, Stderr string
@@ -24,6 +67,7 @@ type Options struct {
 	Stdin   io.Reader
 	Dir     string
 	Env     []string
+	Ctx     context.Context // Optional context for cancellation
 }
 
 func Run(name string, args []string, opts *Options) *Result {
@@ -37,10 +81,22 @@ func Run(name string, args []string, opts *Options) *Result {
 	// Debug: log start
 	start := debug.LogStart(name, args)
 
-	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
+	// Use provided context or create a new one with timeout
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if opts.Ctx != nil {
+		// Use parent context with timeout
+		ctx, cancel = context.WithTimeout(opts.Ctx, opts.Timeout)
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), opts.Timeout)
+	}
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
+
+	// Create new process group so we can kill all child processes
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	if opts.Dir != "" {
 		cmd.Dir = opts.Dir
 	}
@@ -56,7 +112,12 @@ func Run(name string, args []string, opts *Options) *Result {
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
-	err := cmd.Run()
+	err := cmd.Start()
+	if err == nil {
+		trackProcess(cmd)
+		err = cmd.Wait()
+		untrackProcess(cmd)
+	}
 
 	r := &Result{
 		Stdout:   stdoutBuf.String(),
@@ -81,6 +142,25 @@ func RunWithInput(name string, args []string, input string, opts *Options) *Resu
 	if opts == nil {
 		opts = &Options{}
 	}
+	opts.Stdin = strings.NewReader(input)
+	return Run(name, args, opts)
+}
+
+// RunWithContext runs a command with a parent context for cancellation
+func RunWithContext(ctx context.Context, name string, args []string, opts *Options) *Result {
+	if opts == nil {
+		opts = &Options{}
+	}
+	opts.Ctx = ctx
+	return Run(name, args, opts)
+}
+
+// RunWithInputAndContext runs a command with input and a parent context
+func RunWithInputAndContext(ctx context.Context, name string, args []string, input string, opts *Options) *Result {
+	if opts == nil {
+		opts = &Options{}
+	}
+	opts.Ctx = ctx
 	opts.Stdin = strings.NewReader(input)
 	return Run(name, args, opts)
 }

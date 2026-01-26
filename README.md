@@ -121,6 +121,20 @@ go install github.com/rootsploit/reconator@latest
 reconator install --extras
 ```
 
+### From Releases
+
+Download pre-built binaries from [GitHub Releases](https://github.com/rootsploit/reconator/releases).
+
+### Docker
+
+```bash
+# Pull from Docker Hub
+docker pull rootsploit/reconator:latest
+
+# Run a scan
+docker run --rm -v $(pwd)/results:/home/reconator/results rootsploit/reconator scan target.com
+```
+
 ### From Source
 
 ```bash

@@ -18,6 +18,7 @@ import (
 	"github.com/rootsploit/reconator/internal/dirbrute"
 	"github.com/rootsploit/reconator/internal/historic"
 	"github.com/rootsploit/reconator/internal/iprange"
+	"github.com/rootsploit/reconator/internal/jsanalysis"
 	"github.com/rootsploit/reconator/internal/osint"
 	"github.com/rootsploit/reconator/internal/output"
 	"github.com/rootsploit/reconator/internal/portscan"
@@ -52,7 +53,8 @@ func (r *Runner) Run() error {
 	// Deprecation Warning
 	red.Println("\n[DEPRECATED] You are using the legacy sequential runner.")
 	red.Println("             This runner will be removed in v2.2. Please migrate to the new pipeline executor.")
-	red.Println("             Run without '--legacy' flag to use the new default pipeline.\n")
+	red.Println("             Run without '--legacy' flag to use the new default pipeline.")
+	fmt.Println()
 
 	// Enable debug logging if requested
 	if r.cfg.Debug {
@@ -63,7 +65,7 @@ func (r *Runner) Run() error {
 
 	if missing := r.c.GetMissingRequired(); len(missing) > 0 {
 		yellow.Printf("\n⚠ Missing required tools: %v\n", missing)
-		fmt.Println("  Run 'reconator install' to install them\n")
+		fmt.Println("  Run 'reconator install' to install them")
 	}
 
 	targets, err := r.getTargets()
@@ -473,6 +475,22 @@ func (r *Runner) process(target string) error {
 	}
 
 	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 7b: JavaScript Deep Analysis (parallel-safe, uses categorized URLs)
+	// ═══════════════════════════════════════════════════════════════════════
+	var jsRes *jsanalysis.Result
+	if !r.cfg.PassiveMode && categorizedURLs != nil && len(categorizedURLs.JSFiles) > 0 {
+		cyan.Println("[Phase 7b] JavaScript Deep Analysis")
+		fmt.Println("─────────────────────────────────────────────────")
+		analyzer := jsanalysis.NewAnalyzer(r.cfg, r.c)
+		if res, err := analyzer.Analyze(context.Background(), categorizedURLs.JSFiles); err == nil {
+			jsRes = res
+			green.Printf("    Endpoints: %d, DOM XSS Sinks: %d, Secrets: %d\n\n",
+				len(res.Endpoints), len(res.DOMXSSSinks), len(res.Secrets))
+			r.out.SaveJSAnalysisResults(res)
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
 	// Phase 8: Vulnerability Scanning (needs all preceding data)
 	// Dependencies: ports, tech, historic, dirbrute
 	// ═══════════════════════════════════════════════════════════════════════
@@ -600,6 +618,7 @@ func (r *Runner) process(target string) error {
 			AIGuided:   aiRes,
 			OSINT:      osintRes,
 			Screenshot: screenshotRes,
+			JSAnalysis: jsRes,
 		}
 
 		if err := report.Generate(reportData, outDir); err != nil {

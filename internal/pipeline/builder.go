@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/rootsploit/reconator/internal/config"
 	"github.com/rootsploit/reconator/internal/storage"
@@ -33,16 +35,36 @@ func (b *Builder) Build(ctx context.Context, phase Phase) (*PhaseInput, error) {
 	input := NewPhaseInput(b.target, b.scanID, b.cfg)
 
 	deps := GetDependencies(phase)
+	loadedDeps := 0
 	for _, dep := range deps {
 		if err := b.loadPhaseData(ctx, dep, input); err != nil {
 			// Dependencies are soft - phase can run with partial data
-			// Log but don't fail
-			fmt.Printf("        [Builder] Could not load %s data: %v\n", dep, err)
+			// Log warning but continue - expected for phases that didn't run (e.g., IPRange for domain targets)
+			// Check if it's a "not exist" error (expected) vs other errors (unexpected)
+			if !os.IsNotExist(err) && !isStorageNotFound(err) {
+				fmt.Printf("        [Builder] Warning: Failed to load %s dependency for %s: %v\n", dep, phase, err)
+			}
 			continue
 		}
+		loadedDeps++
+	}
+
+	if len(deps) > 0 {
+		fmt.Printf("        [Builder] Loaded %d/%d dependencies for %s\n", loadedDeps, len(deps), phase)
 	}
 
 	return input, nil
+}
+
+// isStorageNotFound checks if an error indicates the data doesn't exist
+func isStorageNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "not found") ||
+		strings.Contains(errStr, "does not exist") ||
+		strings.Contains(errStr, "no such file")
 }
 
 // BuildWithRequired constructs a PhaseInput and fails if required dependencies are missing
@@ -75,21 +97,37 @@ func (b *Builder) loadPhaseData(ctx context.Context, phase Phase, input *PhaseIn
 	// Determine the output file path based on phase
 	path := b.getPhaseOutputPath(phase)
 
+	// Debug: Show what we're trying to load
+	fullPath := filepath.Join(b.storage.BaseDir(), path)
+	fmt.Printf("        [Builder] Loading %s data from: %s\n", phase, fullPath)
+
 	data, err := b.storage.Read(ctx, path)
 	if err != nil {
+		// Check if file exists on disk to help debug
+		if _, statErr := os.Stat(fullPath); os.IsNotExist(statErr) {
+			fmt.Printf("        [Builder] File not found: %s (expected from previous scan)\n", fullPath)
+		} else {
+			fmt.Printf("        [Builder] Error reading %s: %v\n", path, err)
+		}
 		return fmt.Errorf("failed to load %s data from %s: %w", phase, path, err)
 	}
 
-	fmt.Printf("        [Builder] Loaded existing %s data from %s\n", phase, path)
+	fmt.Printf("        [Builder] Loaded existing %s data (%d bytes)\n", phase, len(data))
 
 	// Parse based on phase type
 	switch phase {
+	case PhaseIPRange:
+		return b.parseIPRangeOutput(data, input)
 	case PhaseSubdomain:
 		return b.parseSubdomainOutput(data, input)
 	case PhaseWAF:
 		return b.parseWAFOutput(data, input)
 	case PhasePorts:
 		return b.parsePortsOutput(data, input)
+	case PhaseVHost:
+		// VHost data is consumed by report generation, not other phases
+		// No parsing needed for pipeline dependencies
+		return nil
 	case PhaseHistoric:
 		return b.parseHistoricOutput(data, input)
 	case PhaseTech:
@@ -100,6 +138,15 @@ func (b *Builder) loadPhaseData(ctx context.Context, phase Phase, input *PhaseIn
 		return b.parseTakeoverOutput(data, input)
 	case PhaseDirBrute:
 		return b.parseDirBruteOutput(data, input)
+	case PhaseSecHeaders:
+		return b.parseSecHeadersOutput(data, input)
+	case PhaseScreenshot:
+		// Screenshot data is consumed by report generation, not other phases
+		// No parsing needed for pipeline dependencies
+		return nil
+	case PhaseAIGuided:
+		// AIGuided is a terminal phase, no downstream dependencies
+		return nil
 	}
 
 	return nil
@@ -108,31 +155,39 @@ func (b *Builder) loadPhaseData(ctx context.Context, phase Phase, input *PhaseIn
 // getPhaseOutputPath returns the path to a phase's output JSON file
 func (b *Builder) getPhaseOutputPath(phase Phase) string {
 	// Map phase to directory name (matching current output structure)
+	// IMPORTANT: These MUST match output/manager.go phaseDir() calls
 	dirMap := map[Phase]string{
-		PhaseIPRange:   "0-iprange",
-		PhaseSubdomain: "1-subdomains",
-		PhaseWAF:       "2-waf",
-		PhasePorts:     "3-ports",
-		PhaseTakeover:  "4-takeover",
-		PhaseHistoric:  "5-historic",
-		PhaseTech:      "6-tech",
-		PhaseDirBrute:  "7-dirbrute",
-		PhaseVulnScan:  "8-vulnscan",
-		PhaseAIGuided:  "9-aiguided",
+		PhaseIPRange:    "0-iprange",
+		PhaseSubdomain:  "1-subdomains",
+		PhaseWAF:        "2-waf",
+		PhasePorts:      "3-ports",
+		PhaseVHost:      "4-vhost",
+		PhaseTakeover:   "4-takeover",
+		PhaseHistoric:   "5-historic",
+		PhaseTech:       "6-tech",
+		PhaseSecHeaders: "8-secheaders",
+		PhaseDirBrute:   "7-dirbrute",
+		PhaseVulnScan:   "8-vulnscan",
+		PhaseScreenshot: "9-screenshots",
+		PhaseAIGuided:   "10-aiguided",
 	}
 
 	// Map phase to JSON filename
+	// IMPORTANT: These MUST match output/manager.go saveJSON() calls
 	fileMap := map[Phase]string{
-		PhaseIPRange:   "ip_discovery.json",
-		PhaseSubdomain: "subdomains.json",
-		PhaseWAF:       "waf_detection.json",
-		PhasePorts:     "port_scan.json",
-		PhaseTakeover:  "takeover.json",
-		PhaseHistoric:  "historic_urls.json",
-		PhaseTech:      "tech_detection.json",
-		PhaseDirBrute:  "dirbrute.json",
-		PhaseVulnScan:  "vulnerabilities.json",
-		PhaseAIGuided:  "ai_guided.json",
+		PhaseIPRange:    "ip_discovery.json",
+		PhaseSubdomain:  "subdomains.json",
+		PhaseWAF:        "waf_detection.json",
+		PhasePorts:      "port_scan.json",
+		PhaseVHost:      "vhost.json",
+		PhaseTakeover:   "takeover.json",
+		PhaseHistoric:   "historic_urls.json",
+		PhaseTech:       "tech_detection.json",
+		PhaseSecHeaders: "security_headers.json",
+		PhaseDirBrute:   "dirbrute.json",
+		PhaseVulnScan:   "vulnerabilities.json",
+		PhaseScreenshot: "screenshot_clusters.json",
+		PhaseAIGuided:   "ai_guided.json",
 	}
 
 	return filepath.Join(dirMap[phase], fileMap[phase])
@@ -146,10 +201,12 @@ func (b *Builder) parseSubdomainOutput(data []byte, input *PhaseInput) error {
 		AllSubdomains []string `json:"all_subdomains"`
 	}
 	if err := json.Unmarshal(data, &output); err != nil {
+		fmt.Printf("        [Builder] Failed to parse subdomain JSON: %v\n", err)
 		return err
 	}
 	input.Subdomains = output.Subdomains
 	input.AllSubdomains = output.AllSubdomains
+	fmt.Printf("        [Builder] Parsed %d subdomains, %d all_subdomains\n", len(input.Subdomains), len(input.AllSubdomains))
 	return nil
 }
 
@@ -173,11 +230,13 @@ func (b *Builder) parsePortsOutput(data []byte, input *PhaseInput) error {
 		TLSInfo    map[string]string `json:"tls_info"`
 	}
 	if err := json.Unmarshal(data, &output); err != nil {
+		fmt.Printf("        [Builder] Failed to parse ports JSON: %v\n", err)
 		return err
 	}
 	input.AliveHosts = output.AliveHosts
 	input.OpenPorts = output.OpenPorts
 	input.TLSInfo = output.TLSInfo
+	fmt.Printf("        [Builder] Parsed %d alive_hosts\n", len(input.AliveHosts))
 	return nil
 }
 
@@ -266,5 +325,42 @@ func (b *Builder) parseDirBruteOutput(data []byte, input *PhaseInput) error {
 		return err
 	}
 	input.Discoveries = output.Discoveries
+	return nil
+}
+
+func (b *Builder) parseIPRangeOutput(data []byte, input *PhaseInput) error {
+	var output struct {
+		Target      string   `json:"target"`
+		IPs         []string `json:"ips"`
+		Domains     []string `json:"domains"`
+		BaseDomains []string `json:"base_domains"`
+	}
+	if err := json.Unmarshal(data, &output); err != nil {
+		return err
+	}
+	input.IPRangeIPs = output.IPs
+	input.IPRangeDomains = output.Domains
+	input.IPRangeBaseDomains = output.BaseDomains
+	return nil
+}
+
+func (b *Builder) parseSecHeadersOutput(data []byte, input *PhaseInput) error {
+	var output struct {
+		HeaderFindings []struct {
+			Missing []struct{} `json:"missing"`
+		} `json:"header_findings"`
+	}
+	if err := json.Unmarshal(data, &output); err != nil {
+		return err
+	}
+	// Count hosts with missing security headers
+	count := 0
+	for _, finding := range output.HeaderFindings {
+		if len(finding.Missing) > 0 {
+			count++
+		}
+	}
+	input.SecurityHeaderIssues = count
+	fmt.Printf("        [Builder] Parsed security headers: %d hosts with issues\n", count)
 	return nil
 }

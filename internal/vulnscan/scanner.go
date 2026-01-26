@@ -55,6 +55,249 @@ type TechInput struct {
 	TechCount  map[string]int      // technology -> count across all hosts
 }
 
+// NucleiScanType represents a category of nuclei scan for parallel execution
+type NucleiScanType struct {
+	Name        string   // Scan type name (e.g., "CRLF Injection")
+	Tags        []string // Nuclei tags to use
+	Severity    []string // Severity levels to scan
+	Description string   // Human-readable description
+	Category    string   // Category: "web" uses URLs, "dns" uses subdomains, "network" for SSH
+	CustomPaths []string // Custom paths to check (for endpoint discovery without nuclei templates)
+}
+
+// nucleiParallelScanTypes defines all nuclei scan types to run in parallel
+// Each scan type runs as a separate nuclei process for maximum parallelism
+var nucleiParallelScanTypes = []NucleiScanType{
+	// High Priority - Common Bug Bounty Findings
+	{
+		Name:        "CRLF-Injection",
+		Tags:        []string{"crlf"},
+		Severity:    []string{"critical", "high", "medium"},
+		Description: "CRLF Injection / HTTP Response Splitting",
+		Category:    "web",
+	},
+	{
+		Name:        "Open-Redirect",
+		Tags:        []string{"redirect", "open-redirect"},
+		Severity:    []string{"critical", "high", "medium"},
+		Description: "Open Redirect Vulnerabilities",
+		Category:    "web",
+	},
+	{
+		Name:        "XXE",
+		Tags:        []string{"xxe"},
+		Severity:    []string{"critical", "high"},
+		Description: "XML External Entity Injection",
+		Category:    "web",
+	},
+	{
+		Name:        "SSRF",
+		Tags:        []string{"ssrf", "oast"},
+		Severity:    []string{"critical", "high"},
+		Description: "Server-Side Request Forgery",
+		Category:    "web",
+	},
+	{
+		Name:        "SSTI",
+		Tags:        []string{"ssti"},
+		Severity:    []string{"critical", "high"},
+		Description: "Server-Side Template Injection",
+		Category:    "web",
+	},
+	{
+		Name:        "RCE",
+		Tags:        []string{"rce"},
+		Severity:    []string{"critical"},
+		Description: "Remote Code Execution",
+		Category:    "web",
+	},
+	{
+		Name:        "LFI-RFI",
+		Tags:        []string{"lfi", "rfi", "fileread"},
+		Severity:    []string{"critical", "high"},
+		Description: "Local/Remote File Inclusion",
+		Category:    "web",
+	},
+	{
+		Name:        "SQLi",
+		Tags:        []string{"sqli"},
+		Severity:    []string{"critical", "high"},
+		Description: "SQL Injection",
+		Category:    "web",
+	},
+	// DNS/Takeover Related
+	{
+		Name:        "DNS-Takeover",
+		Tags:        []string{"dns-takeover", "takeover", "subdomain-takeover"},
+		Severity:    []string{"critical", "high"},
+		Description: "DNS/Subdomain Takeover",
+		Category:    "dns",
+	},
+	// Cache/Header Related
+	{
+		Name:        "Cache-Poisoning",
+		Tags:        []string{"cache", "cache-poisoning"},
+		Severity:    []string{"critical", "high", "medium"},
+		Description: "Web Cache Poisoning",
+		Category:    "web",
+	},
+	{
+		Name:        "Host-Header",
+		Tags:        []string{"host-header"},
+		Severity:    []string{"critical", "high", "medium"},
+		Description: "Host Header Injection",
+		Category:    "web",
+	},
+	{
+		Name:        "CORS",
+		Tags:        []string{"cors", "cors-misconfig"},
+		Severity:    []string{"critical", "high", "medium"},
+		Description: "CORS Misconfiguration",
+		Category:    "web",
+	},
+	// Deserialization
+	{
+		Name:        "Deserialization",
+		Tags:        []string{"deserialization", "java-deserialization"},
+		Severity:    []string{"critical", "high"},
+		Description: "Insecure Deserialization",
+		Category:    "web",
+	},
+	// Authentication/Authorization
+	{
+		Name:        "Auth-Bypass",
+		Tags:        []string{"auth-bypass", "default-login"},
+		Severity:    []string{"critical", "high"},
+		Description: "Authentication Bypass / Default Credentials",
+		Category:    "web",
+	},
+	// SSL/TLS Certificate & Protocol Issues
+	{
+		Name:        "SSL-TLS-Critical",
+		Tags:        []string{"ssl", "tls", "expired-ssl", "weak-cipher-suites"},
+		Severity:    []string{"medium"},
+		Description: "SSL/TLS Critical Issues (Expired Cert, Weak Ciphers, Old Protocol)",
+		Category:    "web",
+	},
+	{
+		Name:        "SSL-TLS-Low",
+		Tags:        []string{"self-signed-ssl", "mismatched-ssl-certificate", "mismatched-ssl"},
+		Severity:    []string{"low"},
+		Description: "SSL/TLS Configuration Issues (Self-Signed, Mismatched)",
+		Category:    "web",
+	},
+	{
+		Name:        "SSL-TLS-Info",
+		Tags:        []string{"ssl-issuer", "ssl-dns-names", "tls-version"},
+		Severity:    []string{"info"},
+		Description: "SSL/TLS Information Gathering",
+		Category:    "web",
+	},
+	// SSH Security (ports: 22, 2222, 22222, 2022, 22022)
+	{
+		Name:        "SSH-Auth",
+		Tags:        []string{"ssh-password-auth", "ssh-auth-methods"},
+		Severity:    []string{"medium"},
+		Description: "SSH Authentication Issues (Password Auth Enabled)",
+		Category:    "network",
+	},
+	{
+		Name:        "SSH-Weak-Algo",
+		Tags:        []string{"ssh-weak-algo-supported", "ssh-cbc-mode-ciphers", "ssh-weak-mac-algo"},
+		Severity:    []string{"low"},
+		Description: "SSH Weak Algorithms",
+		Category:    "network",
+	},
+	{
+		Name:        "SSH-Detection",
+		Tags:        []string{"openssh-detect", "ssh-server-enumeration"},
+		Severity:    []string{"info"},
+		Description: "SSH Service Detection & Version",
+		Category:    "network",
+	},
+	// SMTP Security (ports: 25, 465, 587, 2525)
+	// Common issues: open relay, unauthenticated access, VRFY/EXPN commands
+	{
+		Name:        "SMTP-Open-Relay",
+		Tags:        []string{"smtp-open-relay", "open-relay"},
+		Severity:    []string{"high"},
+		Description: "SMTP Open Relay (Unauthenticated Mail Sending)",
+		Category:    "smtp",
+	},
+	{
+		Name:        "SMTP-Misconfig",
+		Tags:        []string{"smtp-vrfy-expn", "smtp-user-enum", "smtp-commands"},
+		Severity:    []string{"medium"},
+		Description: "SMTP Misconfigurations (VRFY/EXPN enabled, User Enumeration)",
+		Category:    "smtp",
+	},
+	{
+		Name:        "SMTP-Detection",
+		Tags:        []string{"smtp-detect", "smtp-service-detect", "smtp"},
+		Severity:    []string{"info"},
+		Description: "SMTP Service Detection & Banner",
+		Category:    "smtp",
+	},
+	// Debug/Monitoring Endpoints Exposure
+	{
+		Name:        "Debug-Endpoints",
+		Tags:        []string{"debug", "prometheus", "actuator", "metrics", "pprof", "phpinfo", "config-exposure"},
+		Severity:    []string{"low", "medium", "info"},
+		Description: "Exposed Debug/Monitoring Endpoints (Prometheus, Actuator, pprof)",
+		Category:    "web",
+	},
+	// MCP (Model Context Protocol) Endpoint Exposure
+	// Exposed /mcp endpoints can allow unauthorized AI model interactions
+	{
+		Name:        "MCP-Endpoints",
+		Tags:        []string{"mcp", "api", "exposure", "config"},
+		Severity:    []string{"medium", "low", "info"},
+		Description: "MCP (Model Context Protocol) Endpoint Exposure",
+		Category:    "web",
+		CustomPaths: []string{"/mcp", "/mcp/", "/.well-known/mcp", "/api/mcp", "/v1/mcp"},
+	},
+	// Log4J / Log4Shell (CVE-2021-44228)
+	{
+		Name:        "Log4J",
+		Tags:        []string{"log4j", "log4shell", "cve-2021-44228", "jndi"},
+		Severity:    []string{"critical", "high"},
+		Description: "Log4J/Log4Shell Remote Code Execution",
+		Category:    "web",
+	},
+	// Spring4Shell / SpringShell (CVE-2022-22965)
+	{
+		Name:        "Spring4Shell",
+		Tags:        []string{"spring4shell", "springshell", "cve-2022-22965", "spring-cloud"},
+		Severity:    []string{"critical", "high"},
+		Description: "Spring4Shell/SpringShell Remote Code Execution",
+		Category:    "web",
+	},
+	// Kubernetes Misconfigurations
+	{
+		Name:        "Kubernetes",
+		Tags:        []string{"kubernetes", "k8s", "kube", "kubectl", "helm", "etcd"},
+		Severity:    []string{"critical", "high", "medium", "low", "info"},
+		Description: "Kubernetes Misconfigurations & Exposures",
+		Category:    "web",
+	},
+	// Docker Misconfigurations
+	{
+		Name:        "Docker",
+		Tags:        []string{"docker", "docker-api", "container", "portainer", "registry"},
+		Severity:    []string{"critical", "high", "medium", "low"},
+		Description: "Docker API & Container Misconfigurations",
+		Category:    "web",
+	},
+	// Cloud Metadata & IMDS
+	{
+		Name:        "Cloud-Metadata",
+		Tags:        []string{"aws", "azure", "gcp", "metadata", "imds", "cloud"},
+		Severity:    []string{"critical", "high", "medium"},
+		Description: "Cloud Metadata Service (IMDS) Exposure",
+		Category:    "web",
+	},
+}
+
 // techToNucleiTags maps detected technologies to relevant nuclei tags
 // This enables targeted vulnerability scanning based on actual tech stack
 var techToNucleiTags = map[string][]string{
@@ -417,6 +660,47 @@ func (s *Scanner) ScanWithTech(hosts []string, categorizedURLs *historic.Categor
 		}()
 	}
 
+	// BB-8: Run quick tests using qsreplace + httpx pipeline (parallel with other scans)
+	// Tests for SSTI, SQLi, XSS reflection, LFI, SSRF, and Open Redirect
+	if categorizedURLs != nil && s.c.IsInstalled("qsreplace") && s.c.IsInstalled("httpx") {
+		hasCategorizedURLs := len(categorizedURLs.SSTI) > 0 || len(categorizedURLs.SQLi) > 0 ||
+			len(categorizedURLs.XSS) > 0 || len(categorizedURLs.LFI) > 0 ||
+			len(categorizedURLs.SSRF) > 0 || len(categorizedURLs.Redirect) > 0
+		if hasCategorizedURLs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				fmt.Println("        Running quick tests (SSTI/SQLi/XSS/LFI/SSRF/Redirect)...")
+				qt := NewQuickTester(s.c, s.cfg.Threads)
+				qtResult := qt.RunQuickTests(categorizedURLs)
+				if qtResult != nil && len(qtResult.Vulnerabilities) > 0 {
+					mu.Lock()
+					result.Vulnerabilities = append(result.Vulnerabilities, qtResult.Vulnerabilities...)
+					mu.Unlock()
+					fmt.Printf("        quick tests: %d potential vulnerabilities found\n", len(qtResult.Vulnerabilities))
+				}
+			}()
+		}
+	}
+
+	// BB-9: Run SSH/SMTP network scans (parallel with other scans)
+	// SSH ports: 22, 2222, 22222, 2022, 22022
+	// SMTP ports: 25, 465, 587, 2525
+	if s.c.IsInstalled("nuclei") && len(hosts) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("        Running SSH/SMTP network scans...")
+			netVulns := s.runNetworkScans(hosts)
+			if len(netVulns) > 0 {
+				mu.Lock()
+				result.Vulnerabilities = append(result.Vulnerabilities, netVulns...)
+				mu.Unlock()
+				fmt.Printf("        network scans: %d findings (SSH/SMTP)\n", len(netVulns))
+			}
+		}()
+	}
+
 	wg.Wait()
 
 	// Dedupe vulnerabilities
@@ -473,15 +757,18 @@ func (s *Scanner) nucleiScan(hostsFile string) []Vulnerability {
 	templateDir := home + "/nuclei-templates"
 
 	// Base args with optimized settings
+	// BB-6: Added -stats -si 60 for progress visibility (stats every 60s)
 	args := []string{
 		"-l", hostsFile,
 		"-severity", "critical,high",
-		"-silent", "-jsonl",
+		"-jsonl",
 		"-exclude-tags", "dos,fuzz",
 		"-ss", "host-spray",
 		"-mhe", "3",
 		"-timeout", "5",
 		"-duc",
+		"-stats",       // BB-6: Show scan statistics
+		"-si", "60",    // BB-6: Stats interval 60 seconds
 	}
 
 	// Add templates based on scan mode
@@ -596,16 +883,19 @@ func (s *Scanner) nucleiTechAwareScan(hostsFile string, techTags []string) []Vul
 	fmt.Printf("        [nuclei] Using tags: %s\n", tagsStr)
 
 	// Base args with optimized settings for tech-aware scan
+	// BB-6: Added -stats -si 60 for progress visibility
 	args := []string{
 		"-l", hostsFile,
 		"-tags", tagsStr,
 		"-severity", "critical,high",
-		"-silent", "-jsonl",
+		"-jsonl",
 		"-exclude-tags", "dos,fuzz",
 		"-ss", "host-spray",
 		"-mhe", "3",
 		"-timeout", "5",
 		"-duc",
+		"-stats",       // BB-6: Show scan statistics
+		"-si", "60",    // BB-6: Stats interval 60 seconds
 	}
 
 	// Performance tuning
@@ -643,11 +933,14 @@ func (s *Scanner) nucleiTargeted(urls []string, tag string) []Vulnerability {
 	}
 	defer cleanup()
 
+	// BB-6: Added -stats -si 30 for progress visibility (shorter interval for targeted scans)
 	args := []string{
 		"-l", tmp,
 		"-tags", tag,
 		"-severity", "critical,high,medium",
-		"-silent", "-jsonl",
+		"-jsonl",
+		"-stats",       // BB-6: Show scan statistics
+		"-si", "30",    // BB-6: Stats interval 30 seconds (shorter for targeted scans)
 	}
 
 	if s.cfg.Threads > 0 {
@@ -796,4 +1089,628 @@ func (s *Scanner) dalfoxScan(urls []string) []Vulnerability {
 	}
 
 	return vulns
+}
+
+// runNetworkScans runs SSH and SMTP network security scans
+// SSH ports: 22, 2222, 22222, 2022, 22022
+// SMTP ports: 25, 465, 587, 2525
+func (s *Scanner) runNetworkScans(hosts []string) []Vulnerability {
+	var allVulns []Vulnerability
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	// Extract unique hostnames from URLs
+	hostnameSet := make(map[string]bool)
+	for _, host := range hosts {
+		hostname := host
+		hostname = strings.TrimPrefix(hostname, "https://")
+		hostname = strings.TrimPrefix(hostname, "http://")
+		hostname = strings.Split(hostname, "/")[0]
+		hostname = strings.Split(hostname, ":")[0]
+		hostnameSet[hostname] = true
+	}
+
+	var hostnames []string
+	for h := range hostnameSet {
+		hostnames = append(hostnames, h)
+	}
+
+	if len(hostnames) == 0 {
+		return nil
+	}
+
+	// Limit to first 100 hosts for network scans (they're slow)
+	if len(hostnames) > 100 {
+		hostnames = hostnames[:100]
+	}
+
+	// SSH scan
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sshPorts := []string{"22", "2222", "22222", "2022", "22022"}
+		var sshTargets []string
+		for _, hostname := range hostnames {
+			for _, port := range sshPorts {
+				sshTargets = append(sshTargets, fmt.Sprintf("%s:%s", hostname, port))
+			}
+		}
+
+		sshFile, cleanup, err := exec.TempFile(strings.Join(sshTargets, "\n"), "-nuclei-ssh.txt")
+		if err != nil {
+			return
+		}
+		defer cleanup()
+
+		// Run SSH scans in sequence (not all at once to avoid overwhelming)
+		sshScans := []struct {
+			name     string
+			tags     string
+			severity string
+		}{
+			{"SSH-Auth", "ssh-password-auth,ssh-auth-methods", "medium"},
+			{"SSH-Weak-Algo", "ssh-weak-algo-supported,ssh-cbc-mode-ciphers,ssh-weak-mac-algo", "low"},
+			{"SSH-Detection", "openssh-detect,ssh-server-enumeration", "info"},
+		}
+
+		for _, scan := range sshScans {
+			args := []string{
+				"-l", sshFile,
+				"-tags", scan.tags,
+				"-severity", scan.severity,
+				"-jsonl",
+				"-silent",
+				"-nc",
+				"-duc",
+				"-timeout", "3",
+				"-c", "25",
+			}
+
+			r := exec.Run("nuclei", args, &exec.Options{Timeout: 3 * time.Minute})
+			if r.Error != nil {
+				continue
+			}
+
+			vulns := s.parseNucleiOutput(r.Stdout)
+			if len(vulns) > 0 {
+				mu.Lock()
+				allVulns = append(allVulns, vulns...)
+				mu.Unlock()
+			}
+		}
+	}()
+
+	// SMTP scan
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		smtpPorts := []string{"25", "465", "587", "2525"}
+		var smtpTargets []string
+		for _, hostname := range hostnames {
+			for _, port := range smtpPorts {
+				smtpTargets = append(smtpTargets, fmt.Sprintf("%s:%s", hostname, port))
+			}
+		}
+
+		smtpFile, cleanup, err := exec.TempFile(strings.Join(smtpTargets, "\n"), "-nuclei-smtp.txt")
+		if err != nil {
+			return
+		}
+		defer cleanup()
+
+		// Run SMTP scans
+		smtpScans := []struct {
+			name     string
+			tags     string
+			severity string
+		}{
+			{"SMTP-Open-Relay", "smtp-open-relay,open-relay", "high"},
+			{"SMTP-Misconfig", "smtp-vrfy-expn,smtp-user-enum,smtp-commands", "medium"},
+			{"SMTP-Detection", "smtp-detect,smtp-service-detect,smtp", "info"},
+		}
+
+		for _, scan := range smtpScans {
+			args := []string{
+				"-l", smtpFile,
+				"-tags", scan.tags,
+				"-severity", scan.severity,
+				"-jsonl",
+				"-silent",
+				"-nc",
+				"-duc",
+				"-timeout", "3",
+				"-c", "25",
+			}
+
+			r := exec.Run("nuclei", args, &exec.Options{Timeout: 3 * time.Minute})
+			if r.Error != nil {
+				continue
+			}
+
+			vulns := s.parseNucleiOutput(r.Stdout)
+			if len(vulns) > 0 {
+				mu.Lock()
+				allVulns = append(allVulns, vulns...)
+				mu.Unlock()
+			}
+		}
+	}()
+
+	wg.Wait()
+	return allVulns
+}
+
+// runParallelNucleiScans runs multiple nuclei scan types in parallel
+// Each scan type targets a specific vulnerability category (CRLF, XXE, SSRF, etc.)
+func (s *Scanner) runParallelNucleiScans(hosts []string, urls []string, subdomains []string) []Vulnerability {
+	if !s.c.IsInstalled("nuclei") {
+		return nil
+	}
+
+	if len(hosts) == 0 && len(urls) == 0 && len(subdomains) == 0 {
+		return nil
+	}
+
+	fmt.Printf("        [ParallelNuclei] Starting %d parallel scan types...\n", len(nucleiParallelScanTypes))
+
+	// Create temp files for targets
+	var hostFile, urlFile, subdomainFile string
+	var cleanupHost, cleanupURL, cleanupSubdomain func()
+
+	if len(hosts) > 0 {
+		var err error
+		hostFile, cleanupHost, err = exec.TempFile(strings.Join(hosts, "\n"), "-nuclei-hosts.txt")
+		if err == nil {
+			defer cleanupHost()
+		}
+	}
+
+	if len(urls) > 0 {
+		var err error
+		urlFile, cleanupURL, err = exec.TempFile(strings.Join(urls, "\n"), "-nuclei-urls.txt")
+		if err == nil {
+			defer cleanupURL()
+		}
+	}
+
+	if len(subdomains) > 0 {
+		var err error
+		subdomainFile, cleanupSubdomain, err = exec.TempFile(strings.Join(subdomains, "\n"), "-nuclei-subs.txt")
+		if err == nil {
+			defer cleanupSubdomain()
+		}
+	}
+
+	// Create SSH targets file for network category (SSH ports: 22, 2222, 22222, 2022, 22022)
+	var sshFile string
+	var cleanupSSH func()
+	if len(hosts) > 0 {
+		sshPorts := []string{"22", "2222", "22222", "2022", "22022"}
+		var sshTargets []string
+		for _, host := range hosts {
+			// Extract hostname from URL if needed
+			hostname := host
+			hostname = strings.TrimPrefix(hostname, "https://")
+			hostname = strings.TrimPrefix(hostname, "http://")
+			hostname = strings.Split(hostname, "/")[0]
+			hostname = strings.Split(hostname, ":")[0] // Remove any existing port
+
+			for _, port := range sshPorts {
+				sshTargets = append(sshTargets, fmt.Sprintf("%s:%s", hostname, port))
+			}
+		}
+		var err error
+		sshFile, cleanupSSH, err = exec.TempFile(strings.Join(sshTargets, "\n"), "-nuclei-ssh.txt")
+		if err == nil {
+			defer cleanupSSH()
+		}
+	}
+
+	// Create SMTP targets file for smtp category (SMTP ports: 25, 465, 587, 2525)
+	var smtpFile string
+	var cleanupSMTP func()
+	if len(hosts) > 0 {
+		smtpPorts := []string{"25", "465", "587", "2525"}
+		var smtpTargets []string
+		for _, host := range hosts {
+			// Extract hostname from URL if needed
+			hostname := host
+			hostname = strings.TrimPrefix(hostname, "https://")
+			hostname = strings.TrimPrefix(hostname, "http://")
+			hostname = strings.Split(hostname, "/")[0]
+			hostname = strings.Split(hostname, ":")[0] // Remove any existing port
+
+			for _, port := range smtpPorts {
+				smtpTargets = append(smtpTargets, fmt.Sprintf("%s:%s", hostname, port))
+			}
+		}
+		var err error
+		smtpFile, cleanupSMTP, err = exec.TempFile(strings.Join(smtpTargets, "\n"), "-nuclei-smtp.txt")
+		if err == nil {
+			defer cleanupSMTP()
+		}
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var allVulns []Vulnerability
+	scansRun := 0
+
+	// Run each scan type in parallel
+	for _, scanType := range nucleiParallelScanTypes {
+		// Choose target file based on category
+		var targetFile string
+		switch scanType.Category {
+		case "dns":
+			targetFile = subdomainFile
+		case "network":
+			targetFile = sshFile // SSH targets with ports
+		case "smtp":
+			targetFile = smtpFile // SMTP targets with ports (25, 465, 587, 2525)
+		case "web":
+			if urlFile != "" {
+				targetFile = urlFile
+			} else {
+				targetFile = hostFile
+			}
+		default:
+			targetFile = hostFile
+		}
+
+		if targetFile == "" {
+			continue
+		}
+
+		wg.Add(1)
+		go func(st NucleiScanType, tf string) {
+			defer wg.Done()
+
+			vulns := s.runSingleNucleiScanType(st, tf)
+			if len(vulns) > 0 {
+				mu.Lock()
+				allVulns = append(allVulns, vulns...)
+				scansRun++
+				mu.Unlock()
+				fmt.Printf("        [ParallelNuclei] %s: %d vulnerabilities\n", st.Name, len(vulns))
+			}
+		}(scanType, targetFile)
+	}
+
+	wg.Wait()
+
+	fmt.Printf("        [ParallelNuclei] Completed: %d scans found %d vulnerabilities\n", scansRun, len(allVulns))
+
+	return allVulns
+}
+
+// runSingleNucleiScanType executes a single nuclei scan type
+func (s *Scanner) runSingleNucleiScanType(scanType NucleiScanType, targetFile string) []Vulnerability {
+	var allVulns []Vulnerability
+
+	// If scan type has custom paths, check them with httpx
+	if len(scanType.CustomPaths) > 0 {
+		customVulns := s.checkCustomPaths(scanType, targetFile)
+		allVulns = append(allVulns, customVulns...)
+	}
+
+	// Run nuclei with tags if tags are defined
+	if len(scanType.Tags) > 0 {
+		args := []string{
+			"-l", targetFile,
+			"-tags", strings.Join(scanType.Tags, ","),
+			"-severity", strings.Join(scanType.Severity, ","),
+			"-jsonl",
+			"-silent",
+			"-nc",  // No color
+			"-duc", // Disable update check
+		}
+
+		// Add threads
+		if s.cfg.Threads > 0 {
+			args = append(args, "-c", fmt.Sprintf("%d", s.cfg.Threads/2)) // Use half threads per scan type
+		} else {
+			args = append(args, "-c", "25")
+		}
+
+		// Shorter timeout per scan type since they're targeted
+		r := exec.Run("nuclei", args, &exec.Options{Timeout: 5 * time.Minute})
+		if r.Error == nil {
+			nucleiVulns := s.parseNucleiOutput(r.Stdout)
+			allVulns = append(allVulns, nucleiVulns...)
+		}
+	}
+
+	return allVulns
+}
+
+// checkCustomPaths uses httpx to check for exposed custom paths (e.g., /mcp, /debug)
+func (s *Scanner) checkCustomPaths(scanType NucleiScanType, targetFile string) []Vulnerability {
+	if !s.c.IsInstalled("httpx") {
+		return nil
+	}
+
+	// Read hosts from target file
+	content, err := os.ReadFile(targetFile)
+	if err != nil {
+		return nil
+	}
+	hosts := exec.Lines(string(content))
+	if len(hosts) == 0 {
+		return nil
+	}
+
+	// Generate URLs for all custom paths
+	var pathURLs []string
+	for _, host := range hosts {
+		// Clean host
+		cleanHost := strings.TrimPrefix(host, "http://")
+		cleanHost = strings.TrimPrefix(cleanHost, "https://")
+		cleanHost = strings.Split(cleanHost, "/")[0]
+
+		for _, path := range scanType.CustomPaths {
+			// Try both HTTP and HTTPS
+			pathURLs = append(pathURLs, fmt.Sprintf("https://%s%s", cleanHost, path))
+			pathURLs = append(pathURLs, fmt.Sprintf("http://%s%s", cleanHost, path))
+		}
+	}
+
+	if len(pathURLs) == 0 {
+		return nil
+	}
+
+	// Create temp file for path URLs
+	tmpFile, cleanup, err := exec.TempFile(strings.Join(pathURLs, "\n"), "-custompaths.txt")
+	if err != nil {
+		return nil
+	}
+	defer cleanup()
+
+	// Use httpx to check which paths are accessible (2xx/3xx status)
+	args := []string{
+		"-l", tmpFile,
+		"-mc", "200,201,202,301,302,307,308", // Only match successful responses
+		"-json",
+		"-silent",
+		"-no-color",
+	}
+	if s.cfg.Threads > 0 {
+		args = append(args, "-threads", fmt.Sprintf("%d", s.cfg.Threads))
+	}
+
+	r := exec.Run("httpx", args, &exec.Options{Timeout: 5 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+
+	var vulns []Vulnerability
+	for _, line := range exec.Lines(r.Stdout) {
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			URL        string `json:"url"`
+			StatusCode int    `json:"status_code"`
+			Title      string `json:"title"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+
+		// Found an accessible endpoint
+		vulns = append(vulns, Vulnerability{
+			URL:        entry.URL,
+			TemplateID: fmt.Sprintf("custom-%s-exposure", strings.ToLower(scanType.Name)),
+			Name:       fmt.Sprintf("%s Endpoint Exposed", scanType.Name),
+			Severity:   "medium",
+			Type:       "exposure",
+			Description: fmt.Sprintf("%s - Exposed endpoint accessible without authentication (Status: %d)",
+				scanType.Description, entry.StatusCode),
+			Tool: "httpx-custom",
+		})
+	}
+
+	if len(vulns) > 0 {
+		fmt.Printf("        [CustomPaths] %s: Found %d exposed endpoints\n", scanType.Name, len(vulns))
+	}
+
+	return vulns
+}
+
+// runCRLFuzz runs CRLFuzz Go tool for CRLF injection detection
+// CRLFuzz is faster and more specialized than nuclei for CRLF
+func (s *Scanner) runCRLFuzz(urls []string) []Vulnerability {
+	if !s.c.IsInstalled("crlfuzz") || len(urls) == 0 {
+		return nil
+	}
+
+	fmt.Printf("        [CRLFuzz] Scanning %d URLs for CRLF injection...\n", len(urls))
+
+	tmpFile, cleanup, err := exec.TempFile(strings.Join(urls, "\n"), "-crlfuzz.txt")
+	if err != nil {
+		return nil
+	}
+	defer cleanup()
+
+	args := []string{
+		"-l", tmpFile,
+		"-s", // Silent - only output vulnerable URLs
+	}
+
+	if s.cfg.Threads > 0 {
+		args = append(args, "-c", fmt.Sprintf("%d", s.cfg.Threads))
+	}
+
+	r := exec.Run("crlfuzz", args, &exec.Options{Timeout: 10 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+
+	var vulns []Vulnerability
+	for _, line := range exec.Lines(r.Stdout) {
+		if line == "" {
+			continue
+		}
+		vulns = append(vulns, Vulnerability{
+			URL:         line,
+			TemplateID:  "crlfuzz-crlf",
+			Name:        "CRLF Injection",
+			Severity:    "medium",
+			Type:        "crlf",
+			Description: "CRLF injection vulnerability detected by CRLFuzz",
+			Tool:        "crlfuzz",
+		})
+	}
+
+	if len(vulns) > 0 {
+		fmt.Printf("        [CRLFuzz] Found %d CRLF vulnerabilities\n", len(vulns))
+	}
+
+	return vulns
+}
+
+// runDNSTake runs DNSTake Go tool for DNS takeover detection
+// DNSTake checks for dangling DNS records pointing to unclaimed resources
+func (s *Scanner) runDNSTake(subdomains []string) []Vulnerability {
+	if !s.c.IsInstalled("dnstake") || len(subdomains) == 0 {
+		return nil
+	}
+
+	fmt.Printf("        [DNSTake] Scanning %d subdomains for DNS takeover...\n", len(subdomains))
+
+	tmpFile, cleanup, err := exec.TempFile(strings.Join(subdomains, "\n"), "-dnstake.txt")
+	if err != nil {
+		return nil
+	}
+	defer cleanup()
+
+	args := []string{
+		"-l", tmpFile,
+		"-s", // Silent
+	}
+
+	if s.cfg.Threads > 0 {
+		args = append(args, "-c", fmt.Sprintf("%d", s.cfg.Threads))
+	}
+
+	r := exec.Run("dnstake", args, &exec.Options{Timeout: 10 * time.Minute})
+	if r.Error != nil {
+		return nil
+	}
+
+	var vulns []Vulnerability
+	for _, line := range exec.Lines(r.Stdout) {
+		if line == "" {
+			continue
+		}
+		// DNSTake outputs vulnerable subdomains with status
+		if strings.Contains(strings.ToLower(line), "vulnerable") {
+			subdomain := line
+			subdomain = strings.TrimPrefix(subdomain, "[VULNERABLE] ")
+			subdomain = strings.TrimPrefix(subdomain, "[vulnerable] ")
+			subdomain = strings.TrimSpace(subdomain)
+
+			vulns = append(vulns, Vulnerability{
+				Host:        subdomain,
+				TemplateID:  "dnstake-takeover",
+				Name:        "DNS Zone Takeover",
+				Severity:    "critical",
+				Type:        "dns-takeover",
+				Description: "DNS zone is vulnerable to takeover - CNAME points to unregistered/unclaimed resource",
+				Tool:        "dnstake",
+			})
+		}
+	}
+
+	if len(vulns) > 0 {
+		fmt.Printf("        [DNSTake] Found %d DNS takeover vulnerabilities\n", len(vulns))
+	}
+
+	return vulns
+}
+
+// ScanWithParallel performs comprehensive vulnerability scanning with parallel nuclei scans
+// This is the enhanced version that runs multiple nuclei scan types in parallel
+func (s *Scanner) ScanWithParallel(hosts []string, urls []string, subdomains []string, categorizedURLs *historic.CategorizedURLs, techInput *TechInput) (*Result, error) {
+	start := time.Now()
+
+	// Get base result from standard scan
+	result, err := s.ScanWithTech(hosts, categorizedURLs, techInput)
+	if err != nil {
+		return nil, err
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	// Run parallel nuclei scans (CRLF, XXE, SSRF, DNS-Takeover, etc.)
+	if s.c.IsInstalled("nuclei") && (len(hosts) > 0 || len(urls) > 0 || len(subdomains) > 0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			vulns := s.runParallelNucleiScans(hosts, urls, subdomains)
+			if len(vulns) > 0 {
+				mu.Lock()
+				result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
+				mu.Unlock()
+			}
+		}()
+	}
+
+	// Run CRLFuzz Go tool (faster than nuclei for CRLF)
+	if s.c.IsInstalled("crlfuzz") && len(urls) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			vulns := s.runCRLFuzz(urls)
+			if len(vulns) > 0 {
+				mu.Lock()
+				result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
+				mu.Unlock()
+			}
+		}()
+	}
+
+	// Run DNSTake Go tool (specialized for DNS takeover)
+	if s.c.IsInstalled("dnstake") && len(subdomains) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			vulns := s.runDNSTake(subdomains)
+			if len(vulns) > 0 {
+				mu.Lock()
+				result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
+				mu.Unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Re-dedupe after adding parallel scan results
+	seen := make(map[string]bool)
+	var unique []Vulnerability
+	result.BySeverity = make(map[string]int)
+	result.ByType = make(map[string]int)
+
+	for _, v := range result.Vulnerabilities {
+		key := fmt.Sprintf("%s|%s|%s", v.URL, v.TemplateID, v.Tool)
+		if v.URL == "" {
+			key = fmt.Sprintf("%s|%s|%s", v.Host, v.TemplateID, v.Tool)
+		}
+		if !seen[key] {
+			seen[key] = true
+			unique = append(unique, v)
+			result.BySeverity[v.Severity]++
+			result.ByType[v.Type]++
+		}
+	}
+	result.Vulnerabilities = unique
+	result.Duration = time.Since(start)
+
+	return result, nil
+}
+
+// GetParallelScanTypes returns all configured parallel nuclei scan types
+func GetParallelScanTypes() []NucleiScanType {
+	return nucleiParallelScanTypes
 }

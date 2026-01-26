@@ -14,12 +14,15 @@ import (
 	"github.com/rootsploit/reconator/internal/dirbrute"
 	"github.com/rootsploit/reconator/internal/historic"
 	"github.com/rootsploit/reconator/internal/iprange"
+	"github.com/rootsploit/reconator/internal/jsanalysis"
 	"github.com/rootsploit/reconator/internal/portscan"
 	"github.com/rootsploit/reconator/internal/screenshot"
+	"github.com/rootsploit/reconator/internal/secheaders"
 	"github.com/rootsploit/reconator/internal/storage"
 	"github.com/rootsploit/reconator/internal/subdomain"
 	"github.com/rootsploit/reconator/internal/takeover"
 	"github.com/rootsploit/reconator/internal/techdetect"
+	"github.com/rootsploit/reconator/internal/vhost"
 	"github.com/rootsploit/reconator/internal/vulnscan"
 	"github.com/rootsploit/reconator/internal/waf"
 )
@@ -303,6 +306,42 @@ func (m *Manager) SaveTakeoverResults(result *takeover.Result) error {
 	return nil
 }
 
+// SaveVHostResults saves VHost discovery results
+func (m *Manager) SaveVHostResults(result *vhost.Result) error {
+	m.results["vhost"] = result
+	dir := m.phaseDir("4-vhost")
+
+	// Save JSON
+	if err := m.saveJSON(filepath.Join(dir, "vhost.json"), result); err != nil {
+		return err
+	}
+
+	// Save VHosts
+	if len(result.VHosts) > 0 {
+		var lines []string
+		for _, vh := range result.VHosts {
+			line := fmt.Sprintf("%s | %s | %s", vh.Host, vh.Source, vh.Target)
+			if vh.Verified {
+				line += " [verified]"
+			}
+			lines = append(lines, line)
+		}
+		m.saveLines(filepath.Join(dir, "vhosts.txt"), lines)
+	}
+
+	// Save certificate SANs
+	if len(result.CertSANs) > 0 {
+		m.saveLines(filepath.Join(dir, "cert_sans.txt"), result.CertSANs)
+	}
+
+	// Save reverse DNS
+	if len(result.ReverseDNS) > 0 {
+		m.saveLines(filepath.Join(dir, "reverse_dns.txt"), result.ReverseDNS)
+	}
+
+	return nil
+}
+
 // SaveHistoricResults saves historic URL collection results
 func (m *Manager) SaveHistoricResults(result *historic.Result) error {
 	m.results["historic"] = result
@@ -379,6 +418,77 @@ func (m *Manager) SaveTechResults(result *techdetect.Result) error {
 	if m.sqliteDB != nil && len(result.TechByHost) > 0 {
 		ctx := context.Background()
 		m.sqliteDB.SaveTechnologies(ctx, m.scanID, result.TechByHost)
+	}
+
+	return nil
+}
+
+// SaveSecHeadersResults saves security headers check results
+func (m *Manager) SaveSecHeadersResults(result *secheaders.Result) error {
+	m.results["secheaders"] = result
+	dir := m.phaseDir("6b-secheaders")
+
+	// Save JSON
+	if err := m.saveJSON(filepath.Join(dir, "security_headers.json"), result); err != nil {
+		return err
+	}
+
+	// Save summary of missing headers
+	if len(result.HeaderFindings) > 0 {
+		var lines []string
+		for _, finding := range result.HeaderFindings {
+			if len(finding.Missing) > 0 {
+				for _, issue := range finding.Missing {
+					lines = append(lines, fmt.Sprintf("%s: MISSING %s (%s)", finding.Host, issue.Header, issue.Severity))
+				}
+			}
+			if len(finding.Weak) > 0 {
+				for _, issue := range finding.Weak {
+					lines = append(lines, fmt.Sprintf("%s: WEAK %s - %s", finding.Host, issue.Header, issue.Description))
+				}
+			}
+		}
+		sort.Strings(lines)
+		m.saveLines(filepath.Join(dir, "header_issues.txt"), lines)
+	}
+
+	// Save email security summary
+	if result.EmailSecurity != nil {
+		var lines []string
+		es := result.EmailSecurity
+		lines = append(lines, fmt.Sprintf("Domain: %s", es.Domain))
+		lines = append(lines, fmt.Sprintf("Email Security Score: %d/100", es.Score))
+		if es.SPF != nil {
+			status := "MISSING"
+			if es.SPF.Found {
+				status = "FOUND"
+			}
+			lines = append(lines, fmt.Sprintf("SPF: %s", status))
+			if es.SPF.Record != "" {
+				lines = append(lines, fmt.Sprintf("  Record: %s", es.SPF.Record))
+			}
+			for _, issue := range es.SPF.Issues {
+				lines = append(lines, fmt.Sprintf("  Issue: %s", issue))
+			}
+		}
+		if es.DMARC != nil {
+			status := "MISSING"
+			if es.DMARC.Found {
+				status = fmt.Sprintf("FOUND (policy=%s)", es.DMARC.Policy)
+			}
+			lines = append(lines, fmt.Sprintf("DMARC: %s", status))
+			for _, issue := range es.DMARC.Issues {
+				lines = append(lines, fmt.Sprintf("  Issue: %s", issue))
+			}
+		}
+		if es.DKIM != nil {
+			status := "NOT DETECTED"
+			if es.DKIM.Found {
+				status = fmt.Sprintf("FOUND (selectors: %s)", strings.Join(es.DKIM.Selectors, ", "))
+			}
+			lines = append(lines, fmt.Sprintf("DKIM: %s", status))
+		}
+		m.saveLines(filepath.Join(dir, "email_security.txt"), lines)
 	}
 
 	return nil
@@ -475,6 +585,63 @@ func (m *Manager) SaveVulnResults(result *vulnscan.Result) error {
 			})
 		}
 		m.sqliteDB.SaveVulnerabilities(ctx, m.scanID, vulns)
+	}
+
+	return nil
+}
+
+// SaveJSAnalysisResults saves JavaScript deep analysis results
+func (m *Manager) SaveJSAnalysisResults(result *jsanalysis.Result) error {
+	m.results["jsanalysis"] = result
+	dir := m.phaseDir("7b-jsanalysis")
+
+	// Save JSON
+	if err := m.saveJSON(filepath.Join(dir, "js_analysis.json"), result); err != nil {
+		return err
+	}
+
+	// Save endpoints to text file
+	if len(result.Endpoints) > 0 {
+		var lines []string
+		for _, ep := range result.Endpoints {
+			line := ep.Path
+			if ep.URL != "" {
+				line = ep.URL
+			}
+			if ep.Sensitive {
+				line += " [SENSITIVE]"
+			}
+			lines = append(lines, line)
+		}
+		m.saveLines(filepath.Join(dir, "endpoints.txt"), lines)
+	}
+
+	// Save DOM XSS sinks
+	if len(result.DOMXSSSinks) > 0 {
+		var lines []string
+		for _, sink := range result.DOMXSSSinks {
+			line := fmt.Sprintf("[%s] %s @ %s:%d", sink.Severity, sink.Type, sink.Source, sink.Line)
+			if sink.HasInput {
+				line += " [USER INPUT]"
+			}
+			lines = append(lines, line)
+		}
+		m.saveLines(filepath.Join(dir, "dom_xss_sinks.txt"), lines)
+	}
+
+	// Save secrets
+	if len(result.Secrets) > 0 {
+		var lines []string
+		for _, secret := range result.Secrets {
+			line := fmt.Sprintf("[%s] %s in %s", secret.Type, secret.Value, secret.Source)
+			lines = append(lines, line)
+		}
+		m.saveLines(filepath.Join(dir, "secrets.txt"), lines)
+	}
+
+	// Save API paths
+	if len(result.APIPaths) > 0 {
+		m.saveLines(filepath.Join(dir, "api_paths.txt"), result.APIPaths)
 	}
 
 	return nil
@@ -586,7 +753,7 @@ func (m *Manager) SaveSummary(target string) error {
 	if portResult, ok := m.results["ports"].(*portscan.Result); ok {
 		summary.Results["ports"] = map[string]interface{}{
 			"total_ports": portResult.TotalPorts,
-			"alive_hosts": len(portResult.AliveHosts),
+			"alive_hosts": portResult.AliveCount,
 			"tls_hosts":   len(portResult.TLSInfo),
 			"duration":    portResult.Duration.String(),
 		}

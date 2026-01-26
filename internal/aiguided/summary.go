@@ -20,15 +20,16 @@ type AssetSummary struct {
 
 // AttackSurface summarizes the discovered attack surface
 type AttackSurface struct {
-	TotalHosts       int      `json:"total_hosts"`
-	TotalEndpoints   int      `json:"total_endpoints"`
-	TotalParameters  int      `json:"total_parameters"`
-	TotalJSFiles     int      `json:"total_js_files"`
-	TotalAPIs        int      `json:"total_apis"`
-	Technologies     []string `json:"technologies"`
-	ExposedServices  []string `json:"exposed_services"`
-	DirectHosts      int      `json:"direct_hosts"`  // Non-WAF protected
-	CDNProtected     int      `json:"cdn_protected"` // WAF protected
+	TotalHosts            int      `json:"total_hosts"`
+	TotalEndpoints        int      `json:"total_endpoints"`
+	TotalParameters       int      `json:"total_parameters"`
+	TotalJSFiles          int      `json:"total_js_files"`
+	TotalAPIs             int      `json:"total_apis"`
+	Technologies          []string `json:"technologies"`
+	ExposedServices       []string `json:"exposed_services"`
+	DirectHosts           int      `json:"direct_hosts"`  // Non-WAF protected
+	CDNProtected          int      `json:"cdn_protected"` // WAF protected
+	SecurityHeaderIssues  int      `json:"security_header_issues"`  // Hosts with missing security headers
 }
 
 // ManualCheck suggests areas that need manual security review
@@ -229,6 +230,11 @@ func GenerateAssetSummary(ctx *TargetContext, categorizedURLs map[string][]strin
 	return summary
 }
 
+// SetSecurityHeaderIssues sets the count of hosts with security header issues
+func (s *AssetSummary) SetSecurityHeaderIssues(count int) {
+	s.AttackSurface.SecurityHeaderIssues = count
+}
+
 func determineConfidence(matches, total int) string {
 	if total == 0 {
 		return "low"
@@ -340,12 +346,15 @@ func (s *AssetSummary) SaveAssetSummary(dir string) error {
 	os.WriteFile(filepath.Join(dir, "asset_summary.json"), data, 0644)
 
 	// Save human-readable report
-	f, _ := os.Create(filepath.Join(dir, "attack_surface_report.txt"))
+	f, err := os.Create(filepath.Join(dir, "attack_surface_report.txt"))
+	if err != nil {
+		return err
+	}
 	defer f.Close()
 
 	fmt.Fprintf(f, "ASSET SUMMARY REPORT - %s\n", s.Domain)
 	fmt.Fprintf(f, "Risk Score: %d/100\n", s.RiskScore)
-	fmt.Fprintf(f, strings.Repeat("=", 60)+"\n\n")
+	fmt.Fprintf(f, "%s\n\n", strings.Repeat("=", 60))
 
 	fmt.Fprintf(f, "ATTACK SURFACE\n")
 	fmt.Fprintf(f, "--------------\n")
@@ -487,6 +496,15 @@ func (sg *SummaryGenerator) buildSummaryPrompt(summary *AssetSummary, vulns []Vu
   <response>Structured JSON with clear action items</response>
 </co_star_context>
 
+<critical_rules>
+  IMPORTANT: Follow these rules strictly:
+  1. NEVER claim "strong security posture" or "robust security" if there are ANY issues (including low severity or info findings)
+  2. Security header issues ARE security issues - they must be mentioned in findings
+  3. Always list the actual issues found by severity (critical, high, medium, low)
+  4. If only low/info issues exist, still highlight them as "areas for improvement"
+  5. Only say "no issues found" if vulnerabilities AND security_headers.hosts_with_issues are both 0
+</critical_rules>
+
 <scan_results>
   <target>%s</target>
   <risk_score>%d/100</risk_score>
@@ -504,14 +522,19 @@ func (sg *SummaryGenerator) buildSummaryPrompt(summary *AssetSummary, vulns []Vu
     <critical>%s</critical>
     <high>%s</high>
   </vulnerabilities>
+  <security_headers>
+    <hosts_with_issues>%d</hosts_with_issues>
+    <severity>low</severity>
+    <note>Missing headers like CSP, HSTS, X-Frame-Options are LOW severity issues that should be addressed</note>
+  </security_headers>
   <attack_chains>%s</attack_chains>
   <high_confidence_issues>%s</high_confidence_issues>
 </scan_results>
 
 <output_requirements>
   <pyramid_structure>
-    1. ONE-LINER: Single sentence conclusion (what's the security posture?)
-    2. KEY FINDINGS: 3-5 bullet points of most important discoveries
+    1. ONE-LINER: Single sentence describing what was found (NOT claiming strong security if issues exist)
+    2. KEY FINDINGS: 3-5 bullet points - MUST include security header issues if hosts_with_issues > 0
     3. IMMEDIATE ACTIONS: 2-3 things to do THIS WEEK
     4. RISK ASSESSMENT: Overall risk level with brief justification
     5. BUSINESS IMPACT: Potential consequences if not addressed
@@ -523,11 +546,11 @@ func (sg *SummaryGenerator) buildSummaryPrompt(summary *AssetSummary, vulns []Vu
 First, in <thinking> tags, analyze the data and determine the most critical issues.
 Then output JSON:
 {
-  "one_liner": "Single sentence executive summary",
+  "one_liner": "Single sentence describing findings (not claiming strong security if any issues exist)",
   "key_findings": [
     "Finding 1 - most critical",
     "Finding 2",
-    "Finding 3"
+    "Finding 3 - include security header issues if any"
   ],
   "immediate_actions": [
     "Action 1 - highest priority",
@@ -554,6 +577,7 @@ Then output JSON:
 		len(vulns),
 		strings.Join(criticalVulns, "; "),
 		strings.Join(highVulns, "; "),
+		summary.AttackSurface.SecurityHeaderIssues,
 		chainSummary,
 		strings.Join(highConfChecks, ", "),
 	)
@@ -599,8 +623,8 @@ func (sg *SummaryGenerator) parseSummaryResponse(response string) (*ExecutiveSum
 }
 
 func (sg *SummaryGenerator) generateRuleBasedSummary(summary *AssetSummary, vulns []Vulnerability) *ExecutiveSummary {
-	// Count vulnerabilities by severity
-	critCount, highCount, medCount := 0, 0, 0
+	// Count vulnerabilities by severity (including low and info)
+	critCount, highCount, medCount, lowCount, infoCount := 0, 0, 0, 0, 0
 	for _, v := range vulns {
 		switch strings.ToLower(v.Severity) {
 		case "critical":
@@ -609,22 +633,42 @@ func (sg *SummaryGenerator) generateRuleBasedSummary(summary *AssetSummary, vuln
 			highCount++
 		case "medium":
 			medCount++
+		case "low":
+			lowCount++
+		case "info":
+			infoCount++
 		}
 	}
 
-	// Determine risk level
+	// Count total issues (security headers are low severity issues)
+	totalIssues := len(vulns) + summary.AttackSurface.SecurityHeaderIssues
+	hasSecurityHeaderIssues := summary.AttackSurface.SecurityHeaderIssues > 0
+
+	// Determine risk level - never claim "strong security" if there are ANY issues
 	riskLevel := "LOW"
 	if summary.RiskScore >= 70 || critCount > 0 {
 		riskLevel = "HIGH"
-	} else if summary.RiskScore >= 40 || highCount > 2 {
+	} else if summary.RiskScore >= 40 || highCount > 2 || medCount > 5 {
 		riskLevel = "MEDIUM"
 	}
 
-	// Build one-liner
-	oneLiner := fmt.Sprintf("%s has a %s security risk posture with %d vulnerabilities identified across %d endpoints.",
-		summary.Domain, riskLevel, len(vulns), summary.AttackSurface.TotalEndpoints)
+	// Build one-liner - be explicit about issues found
+	var oneLiner string
+	if totalIssues == 0 && !hasSecurityHeaderIssues {
+		oneLiner = fmt.Sprintf("%s scan completed with no vulnerabilities identified across %d endpoints.",
+			summary.Domain, summary.AttackSurface.TotalEndpoints)
+	} else if critCount > 0 || highCount > 0 {
+		oneLiner = fmt.Sprintf("%s requires attention: %d critical, %d high, %d medium, %d low severity issues identified.",
+			summary.Domain, critCount, highCount, medCount, lowCount)
+	} else if hasSecurityHeaderIssues {
+		oneLiner = fmt.Sprintf("%s has %d security header issues across %d hosts that should be addressed.",
+			summary.Domain, summary.AttackSurface.SecurityHeaderIssues, summary.AttackSurface.TotalHosts)
+	} else {
+		oneLiner = fmt.Sprintf("%s has %d low severity issues to review across %d endpoints.",
+			summary.Domain, lowCount+infoCount, summary.AttackSurface.TotalEndpoints)
+	}
 
-	// Build key findings
+	// Build key findings - always highlight issues found
 	var findings []string
 	if critCount > 0 {
 		findings = append(findings, fmt.Sprintf("%d critical vulnerabilities require immediate attention", critCount))
@@ -632,16 +676,30 @@ func (sg *SummaryGenerator) generateRuleBasedSummary(summary *AssetSummary, vuln
 	if highCount > 0 {
 		findings = append(findings, fmt.Sprintf("%d high severity issues detected", highCount))
 	}
+	if medCount > 0 {
+		findings = append(findings, fmt.Sprintf("%d medium severity issues detected", medCount))
+	}
+	if lowCount > 0 {
+		findings = append(findings, fmt.Sprintf("%d low severity issues detected", lowCount))
+	}
+	if hasSecurityHeaderIssues {
+		findings = append(findings, fmt.Sprintf("%d hosts with missing security headers (CSP, HSTS, X-Frame-Options) - low severity", summary.AttackSurface.SecurityHeaderIssues))
+	}
 	if summary.AttackSurface.DirectHosts > 0 {
 		findings = append(findings, fmt.Sprintf("%d hosts directly accessible without WAF protection", summary.AttackSurface.DirectHosts))
 	}
-	if len(summary.AttackSurface.Technologies) > 0 {
+	if len(summary.AttackSurface.Technologies) > 0 && len(findings) < 5 {
 		findings = append(findings, fmt.Sprintf("Technology stack includes: %s", strings.Join(truncateList(summary.AttackSurface.Technologies, 5), ", ")))
 	}
 	for _, check := range summary.ManualChecks {
-		if check.Confidence == "high" && len(findings) < 5 {
+		if check.Confidence == "high" && len(findings) < 6 {
 			findings = append(findings, fmt.Sprintf("High confidence %s indicators detected", check.Category))
 		}
+	}
+	// If no findings at all, say so explicitly
+	if len(findings) == 0 {
+		findings = append(findings, "No significant security issues detected in automated scan")
+		findings = append(findings, "Manual testing recommended for business logic vulnerabilities")
 	}
 
 	// Build immediate actions
@@ -649,32 +707,47 @@ func (sg *SummaryGenerator) generateRuleBasedSummary(summary *AssetSummary, vuln
 	if critCount > 0 {
 		actions = append(actions, "Remediate critical vulnerabilities within 24-48 hours")
 	}
+	if highCount > 0 {
+		actions = append(actions, "Address high severity issues within 1 week")
+	}
 	if summary.AttackSurface.DirectHosts > 0 {
 		actions = append(actions, "Enable WAF/CDN protection for exposed hosts")
 	}
+	if hasSecurityHeaderIssues {
+		actions = append(actions, "Deploy missing security headers (CSP, HSTS, X-Frame-Options)")
+	}
 	for _, check := range summary.ManualChecks {
-		if check.Confidence == "high" && len(actions) < 3 {
+		if check.Confidence == "high" && len(actions) < 4 {
 			actions = append(actions, fmt.Sprintf("Investigate %s findings with manual testing", check.Category))
 		}
 	}
 	if len(actions) == 0 {
-		actions = append(actions, "Review medium-severity findings and prioritize remediation")
+		actions = append(actions, "Continue regular security monitoring")
+		actions = append(actions, "Schedule periodic penetration testing")
 	}
 
-	// Build business impact
-	businessImpact := "Minimal business risk if current posture is maintained."
+	// Build business impact - be realistic about issues
+	var businessImpact string
 	if riskLevel == "HIGH" {
 		businessImpact = "Critical vulnerabilities could lead to data breach, service disruption, or unauthorized access. Immediate remediation required."
 	} else if riskLevel == "MEDIUM" {
 		businessImpact = "Identified issues present moderate risk of exploitation. Remediation should be prioritized within the next sprint cycle."
+	} else if hasSecurityHeaderIssues || lowCount > 0 {
+		businessImpact = "Low severity issues identified. While not immediately exploitable, missing security headers can enable certain attack vectors (clickjacking, MIME sniffing). Address during regular maintenance."
+	} else {
+		businessImpact = "No significant vulnerabilities found in automated scanning. Manual testing recommended to identify business logic issues."
 	}
 
 	// Build next steps
-	nextSteps := []string{
-		"Schedule vulnerability remediation sprint",
-		"Conduct manual penetration testing on high-confidence findings",
-		"Review and update security monitoring for identified attack vectors",
+	var nextSteps []string
+	if critCount > 0 || highCount > 0 {
+		nextSteps = append(nextSteps, "Schedule immediate vulnerability remediation sprint")
 	}
+	if hasSecurityHeaderIssues {
+		nextSteps = append(nextSteps, "Implement security headers across all web servers")
+	}
+	nextSteps = append(nextSteps, "Conduct manual penetration testing for business logic vulnerabilities")
+	nextSteps = append(nextSteps, "Review and update security monitoring for identified attack vectors")
 
 	return &ExecutiveSummary{
 		OneLiner:           oneLiner,
@@ -696,11 +769,14 @@ func (es *ExecutiveSummary) SaveExecutiveSummary(dir string) error {
 	os.WriteFile(filepath.Join(dir, "executive_summary.json"), data, 0644)
 
 	// Save human-readable report
-	f, _ := os.Create(filepath.Join(dir, "executive_summary.txt"))
+	f, err := os.Create(filepath.Join(dir, "executive_summary.txt"))
+	if err != nil {
+		return err
+	}
 	defer f.Close()
 
 	fmt.Fprintf(f, "EXECUTIVE SECURITY SUMMARY\n")
-	fmt.Fprintf(f, strings.Repeat("=", 60)+"\n\n")
+	fmt.Fprintf(f, "%s\n\n", strings.Repeat("=", 60))
 
 	fmt.Fprintf(f, "BOTTOM LINE\n")
 	fmt.Fprintf(f, "-----------\n")

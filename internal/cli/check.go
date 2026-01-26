@@ -23,7 +23,8 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	yellow := color.New(color.FgYellow)
 	cyan := color.New(color.FgCyan, color.Bold)
 
-	cyan.Println("\n[+] Reconator Tool Status\n")
+	cyan.Println("\n[+] Reconator Tool Status")
+	fmt.Println()
 
 	checker := tools.NewChecker()
 	status := checker.CheckAll()

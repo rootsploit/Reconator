@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	cfg     config.Config
+	cfg     = *config.DefaultConfig()
 	rootCmd = &cobra.Command{
 		Use:   "reconator",
 		Short: "Reconator - Fast subdomain reconnaissance tool",
@@ -55,6 +55,7 @@ func init() {
 
 	// Add subcommands
 	rootCmd.AddCommand(scanCmd)
+	rootCmd.AddCommand(webscanCmd)
 	rootCmd.AddCommand(monitorCmd)
 	rootCmd.AddCommand(installCmd)
 	rootCmd.AddCommand(checkCmd)

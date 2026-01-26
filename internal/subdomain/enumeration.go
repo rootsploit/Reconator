@@ -40,7 +40,8 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
-	// Phase 1: Passive enumeration (parallel)
+	// Phase 1: Passive enumeration + DNS bruteforce (ALL PARALLEL)
+	// puredns bruteforce uses a wordlist, not discovered subs, so it's independent
 	fmt.Println("    [*] Passive enumeration...")
 	tools := []struct {
 		name string
@@ -104,22 +105,30 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		fmt.Printf("        3rd_party_apis: %d (from %d sources)\n", len(apiSubs), len(apiSources))
 	}()
 
+	// DNS Bruteforce with puredns - RUNS IN PARALLEL with passive enum
+	// This is independent because it uses a wordlist, not discovered subdomains
+	// Moving this to parallel saves 30-60 seconds per scan
+	if !e.cfg.SkipValidation && e.c.IsInstalled("puredns") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("    [*] DNS bruteforce (parallel)...")
+			res := e.bruteforce(domain)
+			mu.Lock()
+			result.Sources["dns_bruteforce"] = len(res)
+			mu.Unlock()
+			for _, s := range res {
+				subs.Store(s, true)
+			}
+			fmt.Printf("        dns_bruteforce: %d\n", len(res))
+		}()
+	}
+
 	// NOTE: wayback/gau subdomain extraction moved to historic phase
 	// Historic collector now extracts subdomains from URLs and feeds them back
 	// This avoids running wayback/gau twice (once for subs, once for URLs)
 
 	wg.Wait()
-
-	// Phase 2: DNS Bruteforce with puredns (runs in passive mode - DNS is passive)
-	if !e.cfg.SkipValidation && e.c.IsInstalled("puredns") {
-		fmt.Println("    [*] DNS bruteforce...")
-		res := e.bruteforce(domain)
-		result.Sources["dns_bruteforce"] = len(res)
-		fmt.Printf("        dns_bruteforce: %d\n", len(res))
-		for _, s := range res {
-			subs.Store(s, true)
-		}
-	}
 
 	// Collect current subdomains for permutation
 	var current []string
@@ -131,52 +140,75 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		return true
 	})
 
-	// Phase 3: Permutations (alterx + mksub + dsieve)
-	// Runs in passive mode too - permutations are passive (DNS validation)
+	// Phase 3: Permutations (alterx + mksub + dsieve) - PARALLEL
+	// alterx and mksub both take current subdomains as input (independent)
+	// Running them in parallel saves 30-60 seconds per scan
 	maxSubs := 2000
 
 	if len(current) > 0 && len(current) < maxSubs {
-		fmt.Println("    [*] Generating permutations...")
+		fmt.Println("    [*] Generating permutations (parallel)...")
 
+		var permMu sync.Mutex
 		permSet := make(map[string]bool)
-		var alterxCount, mksubCount int
+		var alterxCount, mksubCount, aiPermCount int
+		var permWg sync.WaitGroup
 
-		// alterx generates permutations
+		// alterx generates permutations - PARALLEL
 		if e.c.IsInstalled("alterx") {
-			res := e.alterx(current)
-			alterxCount = len(res)
-			for _, s := range res {
-				permSet[s] = true
-			}
-			fmt.Printf("        alterx: %d\n", alterxCount)
-		}
-
-		// mksub
-		if e.c.IsInstalled("mksub") {
-			res := e.mksub(domain, current)
-			mksubCount = len(res)
-			for _, s := range res {
-				permSet[s] = true
-			}
-			fmt.Printf("        mksub: %d\n", mksubCount)
-		}
-
-		// AI-powered permutations (uses LLM to analyze patterns)
-		var aiPermCount int
-		hasAIKeys := e.cfg.OpenAIKey != "" || e.cfg.ClaudeKey != "" || e.cfg.GeminiKey != ""
-		if hasAIKeys && len(current) >= 5 { // Need at least 5 subdomains for pattern analysis
-			aiPerm := NewAIPermutator(e.cfg)
-			aiPerms, err := aiPerm.GenerateSmartPermutations(domain, current)
-			if err == nil && len(aiPerms) > 0 {
-				aiPermCount = len(aiPerms)
-				for _, s := range aiPerms {
+			permWg.Add(1)
+			go func() {
+				defer permWg.Done()
+				res := e.alterx(current)
+				permMu.Lock()
+				alterxCount = len(res)
+				for _, s := range res {
 					permSet[s] = true
 				}
-				fmt.Printf("        ai_permutation: %d\n", aiPermCount)
-			}
+				permMu.Unlock()
+				fmt.Printf("        alterx: %d\n", alterxCount)
+			}()
 		}
 
-		// Convert to slice and filter with dsieve
+		// mksub - PARALLEL
+		if e.c.IsInstalled("mksub") {
+			permWg.Add(1)
+			go func() {
+				defer permWg.Done()
+				res := e.mksub(domain, current)
+				permMu.Lock()
+				mksubCount = len(res)
+				for _, s := range res {
+					permSet[s] = true
+				}
+				permMu.Unlock()
+				fmt.Printf("        mksub: %d\n", mksubCount)
+			}()
+		}
+
+		// AI-powered permutations (uses LLM to analyze patterns) - PARALLEL
+		hasAIKeys := e.cfg.OpenAIKey != "" || e.cfg.ClaudeKey != "" || e.cfg.GeminiKey != ""
+		if hasAIKeys && len(current) >= 5 { // Need at least 5 subdomains for pattern analysis
+			permWg.Add(1)
+			go func() {
+				defer permWg.Done()
+				aiPerm := NewAIPermutator(e.cfg)
+				aiPerms, err := aiPerm.GenerateSmartPermutations(domain, current)
+				if err == nil && len(aiPerms) > 0 {
+					permMu.Lock()
+					aiPermCount = len(aiPerms)
+					for _, s := range aiPerms {
+						permSet[s] = true
+					}
+					permMu.Unlock()
+					fmt.Printf("        ai_permutation: %d\n", aiPermCount)
+				}
+			}()
+		}
+
+		// Wait for all permutation generators to complete
+		permWg.Wait()
+
+		// Convert to slice (dsieve removed - dnsx is fast enough to validate all permutations)
 		var permuted []string
 		for s := range permSet {
 			permuted = append(permuted, s)
@@ -184,10 +216,8 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 
 		if len(permuted) > 0 {
 			fmt.Printf("        combined unique: %d\n", len(permuted))
-			if e.c.IsInstalled("dsieve") {
-				permuted = e.dsieve(domain, permuted)
-				fmt.Printf("        dsieve filtered: %d\n", len(permuted))
-			}
+			// NOTE: dsieve filtering removed - with resolvers, dnsx validates 7500 subs in ~10s
+			// Old dsieve -f 2 was too aggressive (7524 → 1)
 		}
 
 		// Record counts
@@ -226,9 +256,47 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		fmt.Printf("        validated: %d alive\n", len(validated))
 	}
 
-	// Dedupe and sort validated subdomains
+	// Phase 5: SSL Certificate Recon (tlsx/CloudRecon + kaeferjaeger.gay IP ranges)
+	// Scans cloud provider IP ranges for SSL certificates matching target domain
+	// Discovers additional subdomains from certificate CN and SAN fields
+	if (e.c.IsInstalled("tlsx") || e.c.IsInstalled("CloudRecon")) && !e.cfg.PassiveMode {
+		sslRecon := NewSSLCertRecon(e.cfg, e.c)
+
+		// Resolve validated subdomain IPs for targeted scanning
+		var resolvedIPs []string
+		if len(validated) > 0 {
+			resolvedIPs = sslRecon.ResolveSubdomainIPs(validated)
+		}
+
+		sslResult, err := sslRecon.Discover(domain, resolvedIPs)
+		if err == nil && len(sslResult.Subdomains) > 0 {
+			// Record sources
+			for source, count := range sslResult.Sources {
+				result.Sources[source] = count
+			}
+
+			// Validate new subdomains before adding
+			newSubs := sslResult.Subdomains
+			if !e.cfg.SkipValidation {
+				fmt.Println("    [*] Validating SSL cert discoveries...")
+				newSubs = e.validate(newSubs)
+				fmt.Printf("        ssl_cert_validated: %d alive\n", len(newSubs))
+			}
+
+			// Add to validated list
+			for _, sub := range newSubs {
+				validated = append(validated, sub)
+			}
+
+			// Also add to AllSubdomains for takeover checking
+			result.AllSubdomains = append(result.AllSubdomains, sslResult.Subdomains...)
+		}
+	}
+
+	// Dedupe and sort validated subdomains by level (lower levels first for priority scanning)
+	// This ensures level 1 subdomains (api.example.com) are scanned before level 3 (a.b.api.example.com)
 	validated = uniqueStrings(validated)
-	sort.Strings(validated)
+	sortSubdomainsByLevel(validated, domain)
 	result.Subdomains = validated
 	result.Total = len(validated)
 	result.Duration = time.Since(start)
@@ -246,6 +314,27 @@ func uniqueStrings(s []string) []string {
 		}
 	}
 	return result
+}
+
+// sortSubdomainsByLevel sorts subdomains by their level (depth) relative to the base domain
+// Level 1: api.example.com (1 label before base)
+// Level 2: dev.api.example.com (2 labels before base)
+// This ensures important top-level subdomains are scanned first before deeper ones
+// which helps when rate limiting or WAF blocking occurs
+func sortSubdomainsByLevel(subs []string, baseDomain string) {
+	baseLabels := strings.Count(baseDomain, ".") + 1 // example.com = 2 labels
+
+	sort.Slice(subs, func(i, j int) bool {
+		levelI := strings.Count(subs[i], ".") + 1 - baseLabels
+		levelJ := strings.Count(subs[j], ".") + 1 - baseLabels
+
+		// Sort by level first (ascending - lower levels first)
+		if levelI != levelJ {
+			return levelI < levelJ
+		}
+		// Then alphabetically within same level
+		return subs[i] < subs[j]
+	})
 }
 
 func (e *Enumerator) subfinder(domain string) []string {
@@ -331,8 +420,12 @@ func (e *Enumerator) bruteforce(domain string) []string {
 		fmt.Println("        (no wordlist found, run 'reconator install' first)")
 		return nil
 	}
-	// puredns bruteforce <wordlist> <domain> -q (quiet mode outputs to stdout)
+
+	// BB-5: Enhanced puredns flags for v2.x
+	// --skip-wildcard-filter: Skip wildcard detection to prevent false positives
+	// -l: Rate limit for public resolvers
 	args := []string{"bruteforce", wl, domain, "-q"}
+
 	// Use resolvers from config or find installed resolvers
 	resolvers := e.cfg.ResolversFile
 	if resolvers == "" {
@@ -344,8 +437,13 @@ func (e *Enumerator) bruteforce(domain string) []string {
 	if e.cfg.DNSThreads > 0 {
 		args = append(args, "-t", fmt.Sprintf("%d", e.cfg.DNSThreads))
 	}
-	// Increase rate limit for faster bruteforce
-	args = append(args, "--rate-limit", "500")
+
+	// BB-5: Skip wildcard filtering to prevent false positives
+	// puredns v2.x uses --skip-wildcard-filter (not --skip-wildcard)
+	args = append(args, "--skip-wildcard-filter")
+	// Rate limit for public resolvers (puredns v2.x uses -l not --rate-limit)
+	args = append(args, "-l", "500")
+
 	r := exec.Run("puredns", args, &exec.Options{Timeout: 15 * time.Minute})
 	if r.Error != nil {
 		// Check stderr for any output if stdout is empty
@@ -366,7 +464,13 @@ func (e *Enumerator) alterx(subs []string) []string {
 		return nil
 	}
 	defer cleanup()
-	r := exec.Run("alterx", []string{"-l", tmp, "-silent"}, &exec.Options{Timeout: 5 * time.Minute})
+
+	// Limit alterx output to prevent permutation explosion
+	// Default generates 50k+ permutations which overwhelms dnsx validation
+	// Cap at 5000 to balance discovery vs validation time
+	args := []string{"-l", tmp, "-silent", "-limit", "5000"}
+
+	r := exec.Run("alterx", args, &exec.Options{Timeout: 5 * time.Minute})
 	if r.Error != nil {
 		return nil
 	}
@@ -396,13 +500,23 @@ func (e *Enumerator) mksub(domain string, subs []string) []string {
 	if len(wordList) == 0 {
 		return nil
 	}
+
+	// Limit wordlist size to prevent combinatorial explosion
+	// With 100 words at level 2, mksub generates 100*100 = 10k combinations
+	maxWords := 50
+	if len(wordList) > maxWords {
+		wordList = wordList[:maxWords]
+	}
+
 	tmp, cleanup, err := exec.TempFile(strings.Join(wordList, "\n"), ".txt")
 	if err != nil {
 		return nil
 	}
 	defer cleanup()
-	// mksub uses -w for wordlist, not -l (which is for subdomain level)
-	r := exec.Run("mksub", []string{"-d", domain, "-w", tmp}, &exec.Options{Timeout: 5 * time.Minute})
+
+	// mksub uses -w for wordlist, -l for subdomain level (depth)
+	// Limit to level 2 to prevent permutation explosion (level 3+ = millions of combinations)
+	r := exec.Run("mksub", []string{"-d", domain, "-w", tmp, "-l", "2"}, &exec.Options{Timeout: 5 * time.Minute})
 	if r.Error != nil {
 		return nil
 	}
@@ -418,7 +532,11 @@ func (e *Enumerator) dsieve(domain string, subs []string) []string {
 		return subs
 	}
 	defer cleanup()
-	r := exec.Run("dsieve", []string{"-if", tmp, "-f", "3"}, &exec.Options{Timeout: 2 * time.Minute})
+
+	// dsieve -f filters by subdomain level
+	// -f 2: Keep only subdomains with 2 or fewer levels (e.g., api.example.com, not api.dev.example.com)
+	// This reduces permutation count significantly while keeping high-value targets
+	r := exec.Run("dsieve", []string{"-if", tmp, "-f", "2"}, &exec.Options{Timeout: 2 * time.Minute})
 	if r.Error != nil {
 		return subs
 	}
@@ -437,10 +555,42 @@ func (e *Enumerator) validate(subs []string) []string {
 
 	// Prefer dnsx for validation - it reliably outputs to stdout
 	if e.c.IsInstalled("dnsx") {
-		args := []string{"-l", tmp, "-silent", "-resp"}
-		if e.cfg.DNSThreads > 0 {
-			args = append(args, "-t", fmt.Sprintf("%d", e.cfg.DNSThreads))
+		// Optimized dnsx flags for fast mass resolution:
+		// - Use resolvers file (CRITICAL - system DNS is 10x slower)
+		// - High thread count for parallel resolution
+		// - Skip -cname and -wd for pure validation speed (takeover phase does its own CNAME check)
+		args := []string{
+			"-l", tmp,
+			"-silent",
+			"-resp", // Still need response to confirm resolution
 		}
+
+		// CRITICAL FIX: Use resolvers file - without this, dnsx uses system DNS which is 10x slower
+		resolvers := e.cfg.ResolversFile
+		if resolvers == "" {
+			resolvers = tools.FindResolvers()
+		}
+		if resolvers != "" {
+			args = append(args, "-r", resolvers)
+			fmt.Printf("        using resolvers: %s\n", resolvers)
+		}
+
+		// Thread count for DNS resolution
+		// NOTE: More threads != faster! Public resolvers throttle aggressive clients.
+		// Sweet spot: 100-150 threads. Going higher causes:
+		// - Resolver rate limiting → timeouts → retries → slower
+		// - TCP connection overhead
+		// - Network congestion
+		threads := e.cfg.DNSThreads
+		if threads <= 0 {
+			threads = 100 // dnsx default - well tested
+		}
+		args = append(args, "-t", fmt.Sprintf("%d", threads))
+
+		// NOTE: Rate limit removed - dnsx handles this internally
+		// The -rl flag was causing ~2x slowdown in testing
+		// If you experience resolver bans, add: args = append(args, "-rl", "10000")
+
 		if r := exec.Run("dnsx", args, &exec.Options{Timeout: 10 * time.Minute}); r.Error == nil {
 			// dnsx with -resp outputs "domain [ip]", extract just the domain
 			var results []string
