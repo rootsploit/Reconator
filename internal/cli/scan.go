@@ -23,6 +23,7 @@ var (
 	noReport      bool
 	noSQLite      bool
 	noResume      bool // Disable auto-resume of interrupted scans
+	noDNSBrute    bool // Disable DNS bruteforce and permutations
 	useLegacy     bool // Use legacy procedural runner instead of pipeline
 )
 
@@ -88,6 +89,7 @@ func init() {
 	scanCmd.Flags().BoolVar(&noReport, "no-report", false, "Disable HTML report generation")
 	scanCmd.Flags().BoolVar(&noSQLite, "no-sqlite", false, "Disable SQLite persistence (files only)")
 	scanCmd.Flags().BoolVar(&noResume, "no-resume", false, "Disable auto-resume of interrupted scans")
+	scanCmd.Flags().BoolVar(&noDNSBrute, "no-dns-brute", false, "Disable DNS bruteforce and permutations (keeps passive enum + validation)")
 
 	// Legacy opt-in flags (kept for backwards compatibility, now default to true)
 	scanCmd.Flags().BoolVar(&cfg.EnableScreenshots, "screenshots", true, "Enable screenshot capture (default: true)")
@@ -134,6 +136,9 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 	if noResume {
 		cfg.AutoResume = false
+	}
+	if noDNSBrute {
+		cfg.SkipDNSBrute = true
 	}
 
 	// Quick mode skips slow phases

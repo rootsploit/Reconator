@@ -108,7 +108,8 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 	// DNS Bruteforce with puredns - RUNS IN PARALLEL with passive enum
 	// This is independent because it uses a wordlist, not discovered subdomains
 	// Moving this to parallel saves 30-60 seconds per scan
-	if !e.cfg.SkipValidation && e.c.IsInstalled("puredns") {
+	// Skip if --no-dns-brute flag is set (keeps passive enum + validation)
+	if !e.cfg.SkipValidation && !e.cfg.SkipDNSBrute && e.c.IsInstalled("puredns") {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -143,9 +144,10 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 	// Phase 3: Permutations (alterx + mksub + dsieve) - PARALLEL
 	// alterx and mksub both take current subdomains as input (independent)
 	// Running them in parallel saves 30-60 seconds per scan
+	// Skip if --no-dns-brute flag is set (keeps passive enum + validation)
 	maxSubs := 2000
 
-	if len(current) > 0 && len(current) < maxSubs {
+	if len(current) > 0 && len(current) < maxSubs && !e.cfg.SkipDNSBrute {
 		fmt.Println("    [*] Generating permutations (parallel)...")
 
 		var permMu sync.Mutex

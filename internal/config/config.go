@@ -51,6 +51,7 @@ type Config struct {
 	SkipDirBrute bool // Skip directory bruteforce
 	SkipVulnScan bool // Skip vulnerability scanning
 	SkipAIGuided bool // Skip AI-guided scanning
+	SkipDNSBrute bool // Skip DNS bruteforce and permutations (keeps passive enum + validation)
 
 	// Vulnerability scanning options
 	DeepScan       bool   // Run comprehensive nuclei scan (all templates, ~30 min)

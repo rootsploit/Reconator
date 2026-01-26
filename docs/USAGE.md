@@ -460,16 +460,19 @@ results/target.com/
 | `--list` | `-l` | File containing targets | - |
 | `--phases` | `-p` | Phases to run | `all` |
 | `--passive` | - | Passive mode only | `false` |
-| `--concurrency` | `-c` | Thread count | `50` |
-| `--dns-threads` | - | DNS resolver threads | `100` |
-| `--rate` | `-r` | Rate limit (pps) | `100` |
+| `--quick` | - | Quick mode: skip slow phases | `false` |
+| `--threads` | `-c` | Thread count (0=auto) | `0` |
+| `--dns-threads` | - | DNS resolver threads (0=auto) | `0` |
+| `--rate` | `-r` | Rate limit (pps, 0=auto) | `0` |
 | `--skip-validation` | - | Skip DNS validation | `false` |
-| `--skip-dirbrute` | - | Skip directory bruteforce | `false` |
-| `--skip-vulnscan` | - | Skip vulnerability scan | `false` |
-| `--skip-aiguided` | - | Skip AI-guided phase | `false` |
-| `--screenshots` | - | Enable screenshot capture | `false` |
-| `--graphql` | - | Enable GraphQL detection | `false` |
-| `--osint` | - | Enable OSINT dorks | `false` |
+| `--no-dns-brute` | - | Skip DNS bruteforce & permutations (keeps passive enum + validation) | `false` |
+| `--no-screenshots` | - | Disable screenshot capture | `false` |
+| `--no-graphql` | - | Disable GraphQL detection | `false` |
+| `--no-osint` | - | Disable OSINT dorks | `false` |
+| `--no-ai` | - | Disable AI-guided scanning | `false` |
+| `--no-report` | - | Disable HTML report generation | `false` |
+| `--deep` | - | Deep vuln scan with all templates | `false` |
+| `--nuclei-tags` | - | Custom nuclei tags (comma-separated) | - |
 | `--notify` | - | Enable notifications | `false` |
 | `--notify-config` | - | Notify config path | - |
 | `--debug` | - | Enable debug logging | `false` |
