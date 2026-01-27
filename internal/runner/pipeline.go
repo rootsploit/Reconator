@@ -19,6 +19,7 @@ import (
 	"github.com/rootsploit/reconator/internal/dirbrute"
 	"github.com/rootsploit/reconator/internal/historic"
 	"github.com/rootsploit/reconator/internal/iprange"
+	"github.com/rootsploit/reconator/internal/jsanalysis"
 	"github.com/rootsploit/reconator/internal/output"
 	"github.com/rootsploit/reconator/internal/pipeline"
 	"github.com/rootsploit/reconator/internal/portscan"
@@ -74,6 +75,9 @@ func (r *PipelineRunner) Run() error {
 	if r.cfg.Debug {
 		debug.Enable()
 		cyan.Println("[DEBUG MODE ENABLED] Detailed timing logs will be shown")
+		// Dump feature flags that affect phase execution
+		fmt.Printf("[DEBUG] Config: EnableScreenshots=%v, PassiveMode=%v, SkipDirBrute=%v, SkipVulnScan=%v\n",
+			r.cfg.EnableScreenshots, r.cfg.PassiveMode, r.cfg.SkipDirBrute, r.cfg.SkipVulnScan)
 		fmt.Println()
 	}
 
@@ -314,6 +318,14 @@ func (r *PipelineRunner) processTarget(target string) error {
 		for _, phase := range group.Phases {
 			if phasesToRun[phase] && !r.shouldSkipPhase(phase) && !completedPhases[phase] {
 				groupPhases = append(groupPhases, phase)
+			} else if r.cfg.Debug && phase == pipeline.PhaseScreenshot {
+				// Debug: explain why screenshot was filtered out
+				if !phasesToRun[phase] {
+					fmt.Println("    [DEBUG] Screenshot not in phasesToRun")
+				} else if completedPhases[phase] {
+					fmt.Println("    [DEBUG] Screenshot already completed in previous run")
+				}
+				// shouldSkipPhase already logs its reason
 			}
 		}
 
@@ -505,6 +517,7 @@ func (r *PipelineRunner) getPhasesToRun() map[pipeline.Phase]bool {
 		// Run only specified phases - DO NOT add dependencies automatically
 		// Dependencies will be loaded from existing files by the Builder
 		phaseMap := map[string]pipeline.Phase{
+			"iprange":    pipeline.PhaseIPRange,
 			"subdomain":  pipeline.PhaseSubdomain,
 			"waf":        pipeline.PhaseWAF,
 			"ports":      pipeline.PhasePorts,
@@ -512,6 +525,7 @@ func (r *PipelineRunner) getPhasesToRun() map[pipeline.Phase]bool {
 			"takeover":   pipeline.PhaseTakeover,
 			"historic":   pipeline.PhaseHistoric,
 			"tech":       pipeline.PhaseTech,
+			"jsanalysis": pipeline.PhaseJSAnalysis,
 			"secheaders": pipeline.PhaseSecHeaders,
 			"dirbrute":   pipeline.PhaseDirBrute,
 			"vulnscan":   pipeline.PhaseVulnScan,
@@ -553,7 +567,16 @@ func (r *PipelineRunner) shouldSkipPhase(phase pipeline.Phase) bool {
 			return true
 		}
 	case pipeline.PhaseScreenshot:
-		if !r.cfg.EnableScreenshots || r.cfg.PassiveMode {
+		if !r.cfg.EnableScreenshots {
+			if r.cfg.Debug {
+				fmt.Println("    [DEBUG] Skipping screenshot: EnableScreenshots=false")
+			}
+			return true
+		}
+		if r.cfg.PassiveMode {
+			if r.cfg.Debug {
+				fmt.Println("    [DEBUG] Skipping screenshot: PassiveMode=true")
+			}
 			return true
 		}
 	case pipeline.PhaseAIGuided:
@@ -620,6 +643,10 @@ func (r *PipelineRunner) savePhaseResult(phase pipeline.Phase, result *pipeline.
 	case pipeline.PhaseVulnScan:
 		if data, ok := result.Data.(*vulnscan.Result); ok {
 			r.out.SaveVulnResults(data)
+		}
+	case pipeline.PhaseJSAnalysis:
+		if data, ok := result.Data.(*jsanalysis.Result); ok {
+			r.out.SaveJSAnalysisResults(data)
 		}
 	case pipeline.PhaseScreenshot:
 		if data, ok := result.Data.(*screenshot.Result); ok {
@@ -893,16 +920,23 @@ func (r *PipelineRunner) loadExistingResultsForReport(outDir string, reportData 
 		}
 	}
 
+	// Load security headers results if missing
+	if reportData.SecHeaders == nil {
+		if data := loadJSON[secheaders.Result](filepath.Join(outDir, "6b-secheaders", "security_headers.json")); data != nil {
+			reportData.SecHeaders = data
+		}
+	}
+
 	// Load AI-guided results if missing
 	if reportData.AIGuided == nil {
-		if data := loadJSON[aiguided.Result](filepath.Join(outDir, "9-aiguided", "ai_guided.json")); data != nil {
+		if data := loadJSON[aiguided.Result](filepath.Join(outDir, "10-aiguided", "ai_guided.json")); data != nil {
 			reportData.AIGuided = data
 		}
 	}
 
 	// Load screenshot results if missing
 	if reportData.Screenshot == nil {
-		if data := loadJSON[screenshot.Result](filepath.Join(outDir, "screenshots", "screenshot_clusters.json")); data != nil {
+		if data := loadJSON[screenshot.Result](filepath.Join(outDir, "9-screenshots", "screenshot_results.json")); data != nil {
 			reportData.Screenshot = data
 		}
 	}

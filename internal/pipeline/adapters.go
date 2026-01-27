@@ -11,6 +11,7 @@ import (
 	"github.com/rootsploit/reconator/internal/dirbrute"
 	"github.com/rootsploit/reconator/internal/historic"
 	"github.com/rootsploit/reconator/internal/iprange"
+	"github.com/rootsploit/reconator/internal/jsanalysis"
 	"github.com/rootsploit/reconator/internal/portscan"
 	"github.com/rootsploit/reconator/internal/screenshot"
 	"github.com/rootsploit/reconator/internal/secheaders"
@@ -33,6 +34,7 @@ func RegisterAllAdapters(exec *Executor, cfg *config.Config, checker *tools.Chec
 	exec.Register(NewTakeoverAdapter(cfg, checker))
 	exec.Register(NewHistoricAdapter(cfg, checker))
 	exec.Register(NewTechAdapter(cfg, checker))
+	exec.Register(NewJSAnalysisAdapter(cfg, checker))
 	exec.Register(NewSecHeadersAdapter(cfg, checker))
 	exec.Register(NewDirBruteAdapter(cfg, checker))
 	exec.Register(NewVulnScanAdapter(cfg, checker))
@@ -591,29 +593,52 @@ func (a *ScreenshotAdapter) Execute(ctx context.Context, input *PhaseInput) (*Ph
 		StartTime: start,
 	}
 
-	if !input.HasAliveHosts() {
-		fmt.Printf("        [ScreenshotAdapter] Skipping: no alive hosts (AliveHosts=%d)\n", len(input.AliveHosts))
+	// Use httpx results (confirmed HTTP services) instead of raw port scan results
+	targets := input.GetScreenshotTargets()
+	if len(targets) == 0 {
+		fmt.Printf("        [ScreenshotAdapter] Skipping: no targets (httpx_urls=%d, tech_hosts=%d, alive=%d)\n",
+			len(input.HttpxURLs), len(input.TechByHost), len(input.AliveHosts))
 		result.Status = StatusSkipped
 		result.EndTime = time.Now()
 		result.Duration = result.EndTime.Sub(start)
 		return result, nil
 	}
-	fmt.Printf("        [ScreenshotAdapter] Starting capture with %d alive hosts\n", len(input.AliveHosts))
+
+	source := "httpx_urls"
+	if len(input.HttpxURLs) == 0 {
+		if len(input.TechByHost) > 0 {
+			source = "tech_hosts"
+		} else {
+			source = "port_scan"
+		}
+	}
+	fmt.Printf("        [ScreenshotAdapter] Starting capture with %d URLs (source: %s)\n", len(targets), source)
 
 	// Use target-specific output directory for screenshots
 	outputDir := filepath.Join(input.Config.OutputDir, input.Target)
 
 	// Capture screenshots and cluster them
-	res, err := a.capturer.CaptureWithResultInDir(input.AliveHosts, outputDir)
+	res, err := a.capturer.CaptureWithResultInDir(targets, outputDir)
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(start)
 
 	if err != nil {
+		fmt.Printf("        [ScreenshotAdapter] Error: %v\n", err)
 		result.Status = StatusFailed
 		result.Error = err
 		return result, err
 	}
 
+	// Check if screenshots were skipped (e.g., gowitness not installed)
+	if res != nil && res.Skipped {
+		fmt.Printf("        [ScreenshotAdapter] Skipped: %s\n", res.SkipReason)
+		result.Status = StatusSkipped
+		result.Data = res
+		return result, nil
+	}
+
+	fmt.Printf("        [ScreenshotAdapter] Completed: %d captures, %d clusters\n",
+		res.TotalCaptures, len(res.Clusters))
 	result.Status = StatusCompleted
 	result.Data = res
 	return result, nil
@@ -807,6 +832,61 @@ func (a *AIGuidedAdapter) Execute(ctx context.Context, input *PhaseInput) (*Phas
 	}
 
 	res, err := a.scanner.Scan(input.AliveHosts, targetCtx)
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(start)
+
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = err
+		return result, err
+	}
+
+	result.Status = StatusCompleted
+	result.Data = res
+	return result, nil
+}
+
+// JSAnalysisAdapter wraps jsanalysis.Analyzer as a PhaseExecutor
+type JSAnalysisAdapter struct {
+	analyzer *jsanalysis.Analyzer
+	cfg      *config.Config
+}
+
+func NewJSAnalysisAdapter(cfg *config.Config, checker *tools.Checker) *JSAnalysisAdapter {
+	return &JSAnalysisAdapter{
+		analyzer: jsanalysis.NewAnalyzer(cfg, checker),
+		cfg:      cfg,
+	}
+}
+
+func (a *JSAnalysisAdapter) Name() Phase { return PhaseJSAnalysis }
+
+func (a *JSAnalysisAdapter) Execute(ctx context.Context, input *PhaseInput) (*PhaseResult, error) {
+	start := time.Now()
+	result := &PhaseResult{
+		Phase:     PhaseJSAnalysis,
+		Status:    StatusRunning,
+		StartTime: start,
+	}
+
+	// Check if we have JS files from historic phase
+	var jsURLs []string
+	if input.CategorizedURLs != nil && len(input.CategorizedURLs.JSFiles) > 0 {
+		jsURLs = input.CategorizedURLs.JSFiles
+	}
+
+	if len(jsURLs) == 0 {
+		fmt.Printf("        [JSAnalysisAdapter] Skipping: no JS files found in historic URLs\n")
+		result.Status = StatusSkipped
+		result.EndTime = time.Now()
+		result.Duration = result.EndTime.Sub(start)
+		return result, nil
+	}
+
+	fmt.Printf("        [JSAnalysisAdapter] Analyzing %d JavaScript files\n", len(jsURLs))
+
+	// Run JS analysis
+	res, err := a.analyzer.Analyze(ctx, jsURLs)
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(start)
 

@@ -34,7 +34,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&cfg.OutputDir, "output", "o", "./results", "Output directory")
 
 	// Phase selection
-	rootCmd.Flags().StringSliceVarP(&cfg.Phases, "phases", "p", []string{"all"}, "Phases to run (subdomain,waf,ports,takeover,historic,tech,all)")
+	rootCmd.Flags().StringSliceVarP(&cfg.Phases, "phases", "p", []string{"all"}, "Phases to run (iprange,subdomain,waf,ports,vhost,takeover,historic,tech,jsanalysis,secheaders,dirbrute,vulnscan,screenshot,aiguided,all)")
 	rootCmd.Flags().BoolVar(&cfg.SkipValidation, "skip-validation", false, "Skip DNS validation")
 
 	// Performance flags

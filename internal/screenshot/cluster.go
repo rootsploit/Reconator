@@ -98,12 +98,18 @@ func ClusterScreenshots(screenshotDir string, config ClusterConfig) (*Result, er
 		return result, nil
 	}
 
-	// Process each screenshot
+	// Process each screenshot and deduplicate by file hash (exact duplicates)
+	seenFileHash := make(map[string]bool)
 	for _, filePath := range files {
 		meta, err := processScreenshot(filePath)
 		if err != nil {
 			continue // Skip problematic files
 		}
+		// Skip exact duplicates (same image content)
+		if seenFileHash[meta.FileHash] {
+			continue
+		}
+		seenFileHash[meta.FileHash] = true
 		result.Screenshots = append(result.Screenshots, *meta)
 	}
 	result.TotalCaptures = len(result.Screenshots)

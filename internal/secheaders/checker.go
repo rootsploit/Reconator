@@ -19,12 +19,14 @@ type Result struct {
 	TotalScanned   int                 `json:"total_scanned"`
 	HeaderFindings []HeaderFinding     `json:"header_findings"`
 	EmailSecurity  *EmailSecurityCheck `json:"email_security,omitempty"`
+	DNSSecurity    *DNSSecurityCheck   `json:"dns_security,omitempty"`
 	MisconfigVulns []MisconfigVuln     `json:"misconfig_vulns,omitempty"`
 	Duration       time.Duration       `json:"duration"`
 	// Summary counts
 	MissingHeaders   int `json:"missing_headers"`
 	WeakHeaders      int `json:"weak_headers"`
 	EmailIssues      int `json:"email_issues"`
+	DNSIssues        int `json:"dns_issues"`
 	MisconfigCount   int `json:"misconfig_count"`
 }
 
@@ -92,6 +94,60 @@ type MisconfigVuln struct {
 	Severity   string `json:"severity"`
 	Type       string `json:"type"`
 	Description string `json:"description,omitempty"`
+}
+
+// DNSSecurityCheck holds DNS security findings
+type DNSSecurityCheck struct {
+	Domain      string       `json:"domain"`
+	CAA         *CAACheck    `json:"caa"`
+	DNSSEC      *DNSSECCheck `json:"dnssec"`
+	ZoneTransfer *AXFRCheck  `json:"zone_transfer"`
+	Nameservers *NSCheck     `json:"nameservers"`
+	Score       int          `json:"score"` // 0-100 DNS security score
+}
+
+// CAACheck holds CAA record analysis
+type CAACheck struct {
+	HasRecords     bool        `json:"has_records"`
+	Records        []CAARecord `json:"records,omitempty"`
+	AllowsWildcard bool        `json:"allows_wildcard"`
+	HasReporting   bool        `json:"has_reporting"`
+	Issues         []string    `json:"issues,omitempty"`
+	Severity       string      `json:"severity"`
+}
+
+// CAARecord represents a single CAA record
+type CAARecord struct {
+	Flag  int    `json:"flag"`
+	Tag   string `json:"tag"`   // issue, issuewild, iodef
+	Value string `json:"value"`
+}
+
+// DNSSECCheck holds DNSSEC validation results
+type DNSSECCheck struct {
+	Enabled   bool     `json:"enabled"`
+	Validated bool     `json:"validated"`
+	Issues    []string `json:"issues,omitempty"`
+	Severity  string   `json:"severity"`
+}
+
+// AXFRCheck holds zone transfer test results
+type AXFRCheck struct {
+	Vulnerable     bool     `json:"vulnerable"`
+	TestedNS       []string `json:"tested_ns"`
+	VulnerableNS   []string `json:"vulnerable_ns,omitempty"`
+	RecordsExposed int      `json:"records_exposed,omitempty"`
+	Severity       string   `json:"severity"`
+}
+
+// NSCheck holds nameserver analysis
+type NSCheck struct {
+	Count      int      `json:"count"`
+	Servers    []string `json:"servers"`
+	Diverse    bool     `json:"diverse"` // Multiple providers/ASNs
+	DanglingNS []string `json:"dangling_ns,omitempty"`
+	Issues     []string `json:"issues,omitempty"`
+	Severity   string   `json:"severity"`
 }
 
 // Checker performs security header checks
@@ -165,7 +221,34 @@ func (c *Checker) Check(domain string, hosts []string) (*Result, error) {
 		}
 	}()
 
-	// Phase 3: Run nuclei security-misconfiguration templates
+	// Phase 3: Check DNS security (CAA, DNSSEC, AXFR)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		fmt.Println("        Checking DNS security (CAA/DNSSEC/AXFR)...")
+		dnsCheck := c.checkDNSSecurity(domain)
+		mu.Lock()
+		result.DNSSecurity = dnsCheck
+		if dnsCheck != nil {
+			if dnsCheck.CAA != nil && !dnsCheck.CAA.HasRecords {
+				result.DNSIssues++
+			}
+			if dnsCheck.DNSSEC != nil && !dnsCheck.DNSSEC.Enabled {
+				result.DNSIssues++
+			}
+			if dnsCheck.ZoneTransfer != nil && dnsCheck.ZoneTransfer.Vulnerable {
+				result.DNSIssues++
+			}
+		}
+		mu.Unlock()
+		if dnsCheck != nil {
+			fmt.Printf("        DNS security: CAA=%v, DNSSEC=%v, AXFR_vuln=%v (score: %d/100)\n",
+				dnsCheck.CAA.HasRecords, dnsCheck.DNSSEC.Enabled,
+				dnsCheck.ZoneTransfer.Vulnerable, dnsCheck.Score)
+		}
+	}()
+
+	// Phase 4: Run nuclei security-misconfiguration templates
 	if c.c.IsInstalled("nuclei") {
 		wg.Add(1)
 		go func() {
@@ -721,4 +804,259 @@ func (c *Checker) nucleiMisconfigScan(hosts []string) []MisconfigVuln {
 	}
 
 	return vulns
+}
+
+// checkDNSSecurity performs DNS security checks (CAA, DNSSEC, AXFR, NS analysis)
+func (c *Checker) checkDNSSecurity(domain string) *DNSSecurityCheck {
+	result := &DNSSecurityCheck{
+		Domain: domain,
+		Score:  100,
+	}
+
+	// Check CAA records
+	result.CAA = c.checkCAA(domain)
+	if !result.CAA.HasRecords {
+		result.Score -= 15
+	}
+
+	// Check DNSSEC
+	result.DNSSEC = c.checkDNSSEC(domain)
+	if !result.DNSSEC.Enabled {
+		result.Score -= 20
+	}
+
+	// Check nameservers first (needed for AXFR test)
+	result.Nameservers = c.checkNameservers(domain)
+	if result.Nameservers.Count < 2 {
+		result.Score -= 10
+	}
+	if len(result.Nameservers.DanglingNS) > 0 {
+		result.Score -= 25
+	}
+
+	// Check zone transfer vulnerability
+	result.ZoneTransfer = c.checkAXFR(domain, result.Nameservers.Servers)
+	if result.ZoneTransfer.Vulnerable {
+		result.Score -= 40 // Critical issue
+	}
+
+	if result.Score < 0 {
+		result.Score = 0
+	}
+
+	return result
+}
+
+// checkCAA checks CAA (Certificate Authority Authorization) records
+func (c *Checker) checkCAA(domain string) *CAACheck {
+	result := &CAACheck{
+		HasRecords: false,
+		Severity:   "low",
+	}
+
+	// Try to get CAA records using dig (more reliable for CAA)
+	r := exec.Run("dig", []string{domain, "CAA", "+short"}, &exec.Options{Timeout: 10 * time.Second})
+	if r.Error == nil && r.Stdout != "" {
+		lines := exec.Lines(r.Stdout)
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			// Parse CAA record format: flag tag "value"
+			// Example: 0 issue "letsencrypt.org"
+			parts := strings.SplitN(line, " ", 3)
+			if len(parts) >= 3 {
+				result.HasRecords = true
+				flag := 0
+				fmt.Sscanf(parts[0], "%d", &flag)
+				tag := parts[1]
+				value := strings.Trim(parts[2], "\"")
+
+				result.Records = append(result.Records, CAARecord{
+					Flag:  flag,
+					Tag:   tag,
+					Value: value,
+				})
+
+				// Check for wildcard restriction
+				if tag == "issuewild" && value == ";" {
+					result.AllowsWildcard = false
+				} else if tag == "issuewild" {
+					result.AllowsWildcard = true
+				}
+
+				// Check for incident reporting
+				if tag == "iodef" {
+					result.HasReporting = true
+				}
+			}
+		}
+	}
+
+	if !result.HasRecords {
+		result.Issues = append(result.Issues, "No CAA records found - any CA can issue certificates for this domain")
+		result.Severity = "low"
+	} else {
+		result.Severity = "info"
+		if !result.HasReporting {
+			result.Issues = append(result.Issues, "No iodef (incident reporting) CAA record configured")
+		}
+	}
+
+	return result
+}
+
+// checkDNSSEC checks if DNSSEC is enabled and validated
+func (c *Checker) checkDNSSEC(domain string) *DNSSECCheck {
+	result := &DNSSECCheck{
+		Enabled:   false,
+		Validated: false,
+		Severity:  "medium",
+	}
+
+	// Check for DNSKEY records
+	r := exec.Run("dig", []string{domain, "DNSKEY", "+short"}, &exec.Options{Timeout: 10 * time.Second})
+	if r.Error == nil && r.Stdout != "" && !strings.Contains(r.Stdout, "SERVFAIL") {
+		lines := exec.Lines(r.Stdout)
+		for _, line := range lines {
+			if line != "" && !strings.HasPrefix(line, ";") {
+				result.Enabled = true
+				break
+			}
+		}
+	}
+
+	// If DNSKEY exists, check DS record at parent
+	if result.Enabled {
+		r = exec.Run("dig", []string{domain, "DS", "+short"}, &exec.Options{Timeout: 10 * time.Second})
+		if r.Error == nil && r.Stdout != "" {
+			lines := exec.Lines(r.Stdout)
+			for _, line := range lines {
+				if line != "" && !strings.HasPrefix(line, ";") {
+					result.Validated = true
+					break
+				}
+			}
+		}
+	}
+
+	if !result.Enabled {
+		result.Issues = append(result.Issues, "DNSSEC not enabled - DNS responses can be spoofed")
+		result.Severity = "medium"
+	} else if !result.Validated {
+		result.Issues = append(result.Issues, "DNSSEC enabled but DS record not found at parent - chain incomplete")
+		result.Severity = "low"
+	} else {
+		result.Severity = "info"
+	}
+
+	return result
+}
+
+// checkNameservers analyzes nameserver configuration
+func (c *Checker) checkNameservers(domain string) *NSCheck {
+	result := &NSCheck{
+		Servers:  []string{},
+		Severity: "info",
+	}
+
+	// Get NS records
+	nsRecords, err := net.LookupNS(domain)
+	if err != nil {
+		result.Issues = append(result.Issues, "Failed to query NS records")
+		result.Severity = "medium"
+		return result
+	}
+
+	for _, ns := range nsRecords {
+		nsHost := strings.TrimSuffix(ns.Host, ".")
+		result.Servers = append(result.Servers, nsHost)
+
+		// Check if NS resolves (dangling NS detection)
+		_, err := net.LookupHost(nsHost)
+		if err != nil {
+			result.DanglingNS = append(result.DanglingNS, nsHost)
+		}
+	}
+
+	result.Count = len(result.Servers)
+
+	// Check for diversity (simple heuristic: different second-level domains)
+	if result.Count >= 2 {
+		domains := make(map[string]bool)
+		for _, ns := range result.Servers {
+			parts := strings.Split(ns, ".")
+			if len(parts) >= 2 {
+				sld := parts[len(parts)-2] + "." + parts[len(parts)-1]
+				domains[sld] = true
+			}
+		}
+		result.Diverse = len(domains) >= 2
+	}
+
+	// Generate issues
+	if result.Count < 2 {
+		result.Issues = append(result.Issues, "Single nameserver is a single point of failure")
+		result.Severity = "low"
+	}
+	if len(result.DanglingNS) > 0 {
+		result.Issues = append(result.Issues, fmt.Sprintf("Dangling nameservers detected: %v - potential NS takeover risk", result.DanglingNS))
+		result.Severity = "high"
+	}
+	if !result.Diverse && result.Count >= 2 {
+		result.Issues = append(result.Issues, "All nameservers appear to be from the same provider")
+	}
+
+	return result
+}
+
+// checkAXFR tests for zone transfer vulnerability
+func (c *Checker) checkAXFR(domain string, nameservers []string) *AXFRCheck {
+	result := &AXFRCheck{
+		Vulnerable: false,
+		TestedNS:   nameservers,
+		Severity:   "info",
+	}
+
+	if len(nameservers) == 0 {
+		return result
+	}
+
+	// Test zone transfer against each nameserver
+	for _, ns := range nameservers {
+		// Use dig to attempt zone transfer
+		r := exec.Run("dig", []string{
+			"@" + ns,
+			domain,
+			"AXFR",
+			"+noall",
+			"+answer",
+			"+time=5",
+		}, &exec.Options{Timeout: 15 * time.Second})
+
+		if r.Error != nil {
+			continue
+		}
+
+		// Check if we got any records (vulnerability)
+		lines := exec.Lines(r.Stdout)
+		recordCount := 0
+		for _, line := range lines {
+			if line != "" && !strings.HasPrefix(line, ";") && !strings.Contains(line, "Transfer failed") {
+				recordCount++
+			}
+		}
+
+		if recordCount > 0 {
+			result.Vulnerable = true
+			result.VulnerableNS = append(result.VulnerableNS, ns)
+			result.RecordsExposed += recordCount
+		}
+	}
+
+	if result.Vulnerable {
+		result.Severity = "critical"
+	}
+
+	return result
 }

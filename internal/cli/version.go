@@ -12,7 +12,5 @@ var versionCmd = &cobra.Command{
 	Short: "Print version information",
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Printf("reconator version %s\n", version.Version)
-		fmt.Printf("  Build date: %s\n", version.BuildDate)
-		fmt.Printf("  Git commit: %s\n", version.GitCommit)
 	},
 }

@@ -119,33 +119,15 @@ func (c *Checker) Check(subdomains []string) (*Result, error) {
 func (c *Checker) nuclei(input string) []Vulnerable {
 	var vulns []Vulnerable
 
-	// Get home directory for nuclei-templates path
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return vulns
-	}
-	templateDir := home + "/nuclei-templates"
-
 	// Build args for takeover detection
+	// Use tags-based filtering to run ONLY takeover-specific templates
+	// This avoids running CVE/misconfiguration templates from /dns/ directory
+	// CVE scanning happens in the separate vulnscan phase
 	args := []string{
 		"-l", input,
+		"-tags", "takeover", // Only templates tagged with "takeover"
 		"-severity", "critical,high,medium",
 		"-silent", "-jsonl",
-	}
-
-	// Check if templates directory exists at ~/nuclei-templates
-	takeoverDir := templateDir + "/http/takeovers/"
-	if _, err := os.Stat(takeoverDir); err == nil {
-		// Use http/takeovers directory (primary takeover templates)
-		args = append(args, "-t", takeoverDir)
-		// Also add DNS takeover detection templates if they exist
-		dnsDir := templateDir + "/dns/"
-		if _, err := os.Stat(dnsDir); err == nil {
-			args = append(args, "-t", dnsDir)
-		}
-	} else {
-		// Fallback: use tags-based filtering
-		args = append(args, "-tags", "takeover")
 	}
 
 	if c.cfg.Threads > 0 {

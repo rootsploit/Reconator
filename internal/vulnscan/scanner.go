@@ -757,7 +757,6 @@ func (s *Scanner) nucleiScan(hostsFile string) []Vulnerability {
 	templateDir := home + "/nuclei-templates"
 
 	// Base args with optimized settings
-	// BB-6: Added -stats -si 60 for progress visibility (stats every 60s)
 	args := []string{
 		"-l", hostsFile,
 		"-severity", "critical,high",
@@ -767,8 +766,8 @@ func (s *Scanner) nucleiScan(hostsFile string) []Vulnerability {
 		"-mhe", "3",
 		"-timeout", "5",
 		"-duc",
-		"-stats",       // BB-6: Show scan statistics
-		"-si", "60",    // BB-6: Stats interval 60 seconds
+		"-silent", // Suppress banner and info messages
+		"-nc",     // No color output
 	}
 
 	// Add templates based on scan mode
@@ -883,7 +882,6 @@ func (s *Scanner) nucleiTechAwareScan(hostsFile string, techTags []string) []Vul
 	fmt.Printf("        [nuclei] Using tags: %s\n", tagsStr)
 
 	// Base args with optimized settings for tech-aware scan
-	// BB-6: Added -stats -si 60 for progress visibility
 	args := []string{
 		"-l", hostsFile,
 		"-tags", tagsStr,
@@ -894,8 +892,8 @@ func (s *Scanner) nucleiTechAwareScan(hostsFile string, techTags []string) []Vul
 		"-mhe", "3",
 		"-timeout", "5",
 		"-duc",
-		"-stats",       // BB-6: Show scan statistics
-		"-si", "60",    // BB-6: Stats interval 60 seconds
+		"-silent", // Suppress banner and info messages
+		"-nc",     // No color output
 	}
 
 	// Performance tuning
@@ -933,14 +931,13 @@ func (s *Scanner) nucleiTargeted(urls []string, tag string) []Vulnerability {
 	}
 	defer cleanup()
 
-	// BB-6: Added -stats -si 30 for progress visibility (shorter interval for targeted scans)
 	args := []string{
 		"-l", tmp,
 		"-tags", tag,
 		"-severity", "critical,high,medium",
 		"-jsonl",
-		"-stats",       // BB-6: Show scan statistics
-		"-si", "30",    // BB-6: Stats interval 30 seconds (shorter for targeted scans)
+		"-silent", // Suppress banner and info messages
+		"-nc",     // No color output
 	}
 
 	if s.cfg.Threads > 0 {

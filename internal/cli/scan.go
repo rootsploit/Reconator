@@ -16,15 +16,16 @@ import (
 
 // Opt-out flags (features are enabled by default)
 var (
-	noScreenshots bool
-	noGraphQL     bool
-	noOSINT       bool
-	noAI          bool
-	noReport      bool
-	noSQLite      bool
-	noResume      bool // Disable auto-resume of interrupted scans
-	noDNSBrute    bool // Disable DNS bruteforce and permutations
-	useLegacy     bool // Use legacy procedural runner instead of pipeline
+	noScreenshots  bool
+	noGraphQL      bool
+	noOSINT        bool
+	noAI           bool
+	noReport       bool
+	noSQLite       bool
+	noResume       bool // Disable auto-resume of interrupted scans
+	noDNSBrute     bool // Disable DNS bruteforce and permutations
+	useLegacy      bool // Use legacy procedural runner instead of pipeline
+	enableDirBrute bool // Opt-in: enable directory bruteforce (slow)
 )
 
 var scanCmd = &cobra.Command{
@@ -35,8 +36,9 @@ var scanCmd = &cobra.Command{
 Uses pipeline executor by default for parallel phase execution and better performance.
 Interrupted scans are automatically resumed from where they left off (use --no-resume to disable).
 Use --parallel-targets N to scan multiple targets concurrently (useful with -l targets.txt).
-All features are enabled by default. Use --no-* flags to disable specific features.
-Use --quick for a fast scan that skips slow phases (dir bruteforce, full vuln scan).
+Most features are enabled by default. Use --no-* flags to disable specific features.
+Directory bruteforce is disabled by default (slow). Use --dir-brute to enable it.
+Use --quick for a fast scan that also skips full vuln scan.
 Use --passive for passive-only reconnaissance (no active probing).
 Use --legacy to use the procedural runner instead of the pipeline executor.`,
 	Args: cobra.MaximumNArgs(1),
@@ -49,7 +51,7 @@ func init() {
 	scanCmd.Flags().StringVarP(&cfg.OutputDir, "output", "o", "./results", "Output directory")
 
 	// Phase selection
-	scanCmd.Flags().StringSliceVarP(&cfg.Phases, "phases", "p", []string{"all"}, "Phases to run (subdomain,waf,ports,takeover,historic,tech,all)")
+	scanCmd.Flags().StringSliceVarP(&cfg.Phases, "phases", "p", []string{"all"}, "Phases to run (iprange,subdomain,waf,ports,vhost,takeover,historic,tech,jsanalysis,secheaders,dirbrute,vulnscan,screenshot,aiguided,all)")
 	scanCmd.Flags().BoolVar(&cfg.SkipValidation, "skip-validation", false, "Skip DNS validation")
 
 	// Performance (auto-detected based on system resources, override if needed)
@@ -90,6 +92,9 @@ func init() {
 	scanCmd.Flags().BoolVar(&noSQLite, "no-sqlite", false, "Disable SQLite persistence (files only)")
 	scanCmd.Flags().BoolVar(&noResume, "no-resume", false, "Disable auto-resume of interrupted scans")
 	scanCmd.Flags().BoolVar(&noDNSBrute, "no-dns-brute", false, "Disable DNS bruteforce and permutations (keeps passive enum + validation)")
+
+	// Opt-in flags (slow/aggressive features disabled by default)
+	scanCmd.Flags().BoolVar(&enableDirBrute, "dir-brute", false, "Enable directory bruteforce (slow, disabled by default)")
 
 	// Legacy opt-in flags (kept for backwards compatibility, now default to true)
 	scanCmd.Flags().BoolVar(&cfg.EnableScreenshots, "screenshots", true, "Enable screenshot capture (default: true)")
@@ -141,7 +146,11 @@ func runScan(cmd *cobra.Command, args []string) error {
 		cfg.SkipDNSBrute = true
 	}
 
-	// Quick mode skips slow phases
+	// DirBrute is opt-in (disabled by default because it's slow)
+	// Only enable if --dir-brute flag is explicitly passed
+	cfg.SkipDirBrute = !enableDirBrute
+
+	// Quick mode skips slow phases (reinforces dirbrute skip)
 	if cfg.QuickMode {
 		cfg.SkipDirBrute = true
 		cfg.SkipVulnScan = true

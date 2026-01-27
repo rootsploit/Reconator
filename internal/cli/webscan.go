@@ -47,8 +47,8 @@ func init() {
 	webscanCmd.Flags().IntVarP(&cfg.Threads, "threads", "c", 0, "Concurrent threads (0=auto-detect)")
 	webscanCmd.Flags().BoolVar(&webscanFast, "fast", false, "Fast mode: skip tech detection and headers, run nuclei -as only")
 
-	// Scan features
-	webscanCmd.Flags().BoolVar(&cfg.EnableScreenshots, "screenshots", false, "Capture screenshots")
+	// Scan features (screenshots enabled by default to match scan command)
+	webscanCmd.Flags().BoolVar(&cfg.EnableScreenshots, "screenshots", true, "Capture screenshots (default: true)")
 
 	// Debug
 	webscanCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Show detailed timing logs")

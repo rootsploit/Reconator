@@ -162,8 +162,8 @@ func GetExecutionOrder() [][]Phase {
 		// Level 0: Entry points (no dependencies) - Historic runs parallel with Subdomain!
 		// Historic only needs root domain for gau/waybackurls/urlfinder (saves 2-3 min)
 		{PhaseIPRange, PhaseSubdomain, PhaseHistoric},
-		// Level 1: Takeover only needs subdomains (can run before ports)
-		{PhaseTakeover},
+		// Level 1: Takeover needs subdomains, JSAnalysis needs historic URLs (both can run in parallel)
+		{PhaseTakeover, PhaseJSAnalysis},
 		// Level 2: Port scanning to get alive hosts
 		{PhasePorts},
 		// Level 3: WAF detection needs alive hosts from ports (provides CDN filtering for Level 4)
@@ -184,8 +184,8 @@ func GetExecutionOrderForASN() [][]Phase {
 		// Level 0: IP Range discovery first (ASN → CIDRs → IPs → domains → TLDs)
 		// Historic also runs here (only needs root domain/ASN)
 		{PhaseIPRange, PhaseHistoric},
-		// Level 1: Subdomain enumeration on discovered TLDs
-		{PhaseSubdomain},
+		// Level 1: Subdomain enumeration on discovered TLDs, JSAnalysis on historic URLs
+		{PhaseSubdomain, PhaseJSAnalysis},
 		// Level 2: Takeover only needs subdomains
 		{PhaseTakeover},
 		// Level 3: Port scanning to get alive hosts

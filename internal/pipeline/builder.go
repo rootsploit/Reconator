@@ -140,6 +140,10 @@ func (b *Builder) loadPhaseData(ctx context.Context, phase Phase, input *PhaseIn
 		return b.parseDirBruteOutput(data, input)
 	case PhaseSecHeaders:
 		return b.parseSecHeadersOutput(data, input)
+	case PhaseJSAnalysis:
+		// JSAnalysis data is consumed by report generation, not other phases
+		// No parsing needed for pipeline dependencies
+		return nil
 	case PhaseScreenshot:
 		// Screenshot data is consumed by report generation, not other phases
 		// No parsing needed for pipeline dependencies
@@ -165,7 +169,8 @@ func (b *Builder) getPhaseOutputPath(phase Phase) string {
 		PhaseTakeover:   "4-takeover",
 		PhaseHistoric:   "5-historic",
 		PhaseTech:       "6-tech",
-		PhaseSecHeaders: "8-secheaders",
+		PhaseJSAnalysis: "7b-jsanalysis",
+		PhaseSecHeaders: "6b-secheaders", // FIXED: was 8-secheaders, must match output/manager.go
 		PhaseDirBrute:   "7-dirbrute",
 		PhaseVulnScan:   "8-vulnscan",
 		PhaseScreenshot: "9-screenshots",
@@ -183,10 +188,11 @@ func (b *Builder) getPhaseOutputPath(phase Phase) string {
 		PhaseTakeover:   "takeover.json",
 		PhaseHistoric:   "historic_urls.json",
 		PhaseTech:       "tech_detection.json",
+		PhaseJSAnalysis: "js_analysis.json",
 		PhaseSecHeaders: "security_headers.json",
 		PhaseDirBrute:   "dirbrute.json",
 		PhaseVulnScan:   "vulnerabilities.json",
-		PhaseScreenshot: "screenshot_clusters.json",
+		PhaseScreenshot: "screenshot_results.json", // FIXED: was screenshot_clusters.json, must match output/manager.go
 		PhaseAIGuided:   "ai_guided.json",
 	}
 
@@ -225,9 +231,11 @@ func (b *Builder) parseWAFOutput(data []byte, input *PhaseInput) error {
 
 func (b *Builder) parsePortsOutput(data []byte, input *PhaseInput) error {
 	var output struct {
-		AliveHosts []string          `json:"alive_hosts"`
-		OpenPorts  map[string][]int  `json:"open_ports"`
-		TLSInfo    map[string]string `json:"tls_info"`
+		AliveHosts []string            `json:"alive_hosts"`
+		OpenPorts  map[string][]int    `json:"open_ports"`
+		TLSInfo    json.RawMessage     `json:"tls_info"` // Skip parsing - complex struct not needed by downstream phases
+		CDNHosts   []string            `json:"cdn_hosts"`
+		NonCDN     []string            `json:"non_cdn_hosts"`
 	}
 	if err := json.Unmarshal(data, &output); err != nil {
 		fmt.Printf("        [Builder] Failed to parse ports JSON: %v\n", err)
@@ -235,8 +243,16 @@ func (b *Builder) parsePortsOutput(data []byte, input *PhaseInput) error {
 	}
 	input.AliveHosts = output.AliveHosts
 	input.OpenPorts = output.OpenPorts
-	input.TLSInfo = output.TLSInfo
-	fmt.Printf("        [Builder] Parsed %d alive_hosts\n", len(input.AliveHosts))
+	// TLSInfo is not used by downstream phases, only for report generation
+	// CDN info can be used for filtering
+	if len(output.NonCDN) > 0 {
+		input.DirectHosts = output.NonCDN
+	}
+	if len(output.CDNHosts) > 0 {
+		input.CDNHosts = output.CDNHosts
+	}
+	fmt.Printf("        [Builder] Parsed %d alive_hosts, %d non-CDN, %d CDN\n",
+		len(input.AliveHosts), len(input.DirectHosts), len(input.CDNHosts))
 	return nil
 }
 
@@ -286,12 +302,15 @@ func (b *Builder) parseTechOutput(data []byte, input *PhaseInput) error {
 	var output struct {
 		TechByHost map[string][]string `json:"tech_by_host"`
 		TechCount  map[string]int      `json:"tech_count"`
+		HttpxURLs  []string            `json:"httpx_urls"`
 	}
 	if err := json.Unmarshal(data, &output); err != nil {
 		return err
 	}
 	input.TechByHost = output.TechByHost
 	input.TechCount = output.TechCount
+	input.HttpxURLs = output.HttpxURLs
+	fmt.Printf("        [Builder] Parsed tech: %d hosts, %d httpx_urls\n", len(input.TechByHost), len(input.HttpxURLs))
 	return nil
 }
 

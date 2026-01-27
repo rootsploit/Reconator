@@ -23,6 +23,7 @@ type Result struct {
 	TechByHost    map[string][]string    `json:"tech_by_host"`
 	TechCount     map[string]int         `json:"tech_count"`
 	VersionByHost map[string][]string    `json:"version_by_host,omitempty"` // Service versions (e.g., "Grafana v9.1.1")
+	HttpxURLs     []string               `json:"httpx_urls,omitempty"`      // Full URLs that responded to httpx (for screenshots)
 	Total         int                    `json:"total"`
 	Duration      time.Duration          `json:"duration"`
 }
@@ -51,7 +52,8 @@ func (d *Detector) Detect(hosts []string) (*Result, error) {
 
 	// Use httpx with tech detection and header extraction
 	if d.c.IsInstalled("httpx") {
-		techResults, versionResults := d.httpxTechDetect(hosts)
+		techResults, versionResults, httpxURLs := d.httpxTechDetect(hosts)
+		result.HttpxURLs = httpxURLs // Store URLs with protocol for screenshots
 		for host, techs := range techResults {
 			result.TechByHost[host] = techs
 			for _, tech := range techs {
@@ -133,17 +135,17 @@ func (d *Detector) Detect(hosts []string) (*Result, error) {
 }
 
 // httpxTechDetect uses httpx with tech detection and version extraction
-// Returns: techByHost (wappalyzer-based), versionByHost (from Server/X-Powered-By headers)
-func (d *Detector) httpxTechDetect(hosts []string) (map[string][]string, map[string][]string) {
+// Returns: techByHost (wappalyzer-based), versionByHost (from Server/X-Powered-By headers), httpxURLs (full URLs with protocol)
+func (d *Detector) httpxTechDetect(hosts []string) (map[string][]string, map[string][]string, []string) {
 	if !d.c.IsInstalled("httpx") {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Create temp file with hosts
 	input := strings.Join(hosts, "\n")
 	tmpFile, cleanup, err := exec.TempFile(input, "-hosts.txt")
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	defer cleanup()
 
@@ -165,12 +167,14 @@ func (d *Detector) httpxTechDetect(hosts []string) (map[string][]string, map[str
 
 	r := exec.Run("httpx", args, &exec.Options{Timeout: 10 * time.Minute})
 	if r.Error != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Parse JSON output
 	techResults := make(map[string][]string)
 	versionResults := make(map[string][]string)
+	seenURLs := make(map[string]bool) // Deduplicate URLs
+	var httpxURLs []string
 
 	for _, line := range exec.Lines(r.Stdout) {
 		if line == "" {
@@ -184,6 +188,21 @@ func (d *Detector) httpxTechDetect(hosts []string) (map[string][]string, map[str
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			continue
+		}
+
+		// Collect unique URLs with protocol for screenshots
+		// Strip path but keep protocol and host:port
+		baseURL := entry.URL
+		// Find position after "://" to locate the path separator
+		if schemeEnd := strings.Index(baseURL, "://"); schemeEnd > 0 {
+			hostStart := schemeEnd + 3 // Position after "://"
+			if pathIdx := strings.Index(baseURL[hostStart:], "/"); pathIdx > 0 {
+				baseURL = baseURL[:hostStart+pathIdx]
+			}
+		}
+		if !seenURLs[baseURL] {
+			seenURLs[baseURL] = true
+			httpxURLs = append(httpxURLs, baseURL)
 		}
 
 		// Extract host from URL (strip scheme, path, and port)
@@ -266,7 +285,7 @@ func (d *Detector) httpxTechDetect(hosts []string) (map[string][]string, map[str
 		}
 	}
 
-	return techResults, versionResults
+	return techResults, versionResults, httpxURLs
 }
 
 // extractVersionFromHeader extracts version info from a header value

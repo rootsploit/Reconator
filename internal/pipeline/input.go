@@ -22,9 +22,9 @@ type PhaseInput struct {
 	CDNHosts    []string // WAF/CDN protected hosts
 
 	// From ports phase
-	AliveHosts []string          // Hosts with HTTP(S) services
-	OpenPorts  map[string][]int  // host -> [ports]
-	TLSInfo    map[string]string // host -> cert info
+	AliveHosts []string         // Hosts with HTTP(S) services
+	OpenPorts  map[string][]int // host -> [ports]
+	// TLSInfo is not used by downstream phases - it's parsed directly from JSON for reports
 
 	// From historic phase
 	URLs              []string
@@ -34,6 +34,7 @@ type PhaseInput struct {
 	// From tech phase
 	TechByHost map[string][]string // host -> [technologies]
 	TechCount  map[string]int      // technology -> count
+	HttpxURLs  []string            // Full URLs with protocol that responded to httpx (for screenshots)
 
 	// From vulnscan phase
 	Vulnerabilities []Vulnerability
@@ -122,6 +123,38 @@ func (p *PhaseInput) HasURLs() bool {
 // HasTechStack returns true if technology detection data is available
 func (p *PhaseInput) HasTechStack() bool {
 	return len(p.TechByHost) > 0
+}
+
+// GetHttpxHosts returns hosts that responded to httpx probing (from tech phase)
+// These are confirmed HTTP services, unlike AliveHosts which are raw port scan results
+func (p *PhaseInput) GetHttpxHosts() []string {
+	if len(p.TechByHost) == 0 {
+		return nil
+	}
+	hosts := make([]string, 0, len(p.TechByHost))
+	for host := range p.TechByHost {
+		hosts = append(hosts, host)
+	}
+	return hosts
+}
+
+// GetScreenshotTargets returns the best URLs for screenshots
+// Prefers HttpxURLs (full URLs with protocol), falls back to hostnames
+func (p *PhaseInput) GetScreenshotTargets() []string {
+	// Best: httpx URLs with protocol (no duplicates)
+	if len(p.HttpxURLs) > 0 {
+		return p.HttpxURLs
+	}
+	// Fallback: generate URLs from TechByHost hostnames (prepend https://)
+	if httpxHosts := p.GetHttpxHosts(); len(httpxHosts) > 0 {
+		urls := make([]string, 0, len(httpxHosts))
+		for _, host := range httpxHosts {
+			urls = append(urls, "https://"+host)
+		}
+		return urls
+	}
+	// Last resort: AliveHosts from port scan
+	return p.AliveHosts
 }
 
 // HasIPRangeData returns true if IP range discovery data is available

@@ -303,29 +303,38 @@ func aggregateSubdomainDetails(data *Data) []SubdomainDetail {
 		details = append(details, detail)
 	}
 
-	// Sort by: takeovers/vulns first for security, then by subdomain level (lower first), then alphabetically
-	// This ensures level 1 subdomains (api.example.com) appear before level 3 (dev.api.internal.example.com)
+	// Sort by: subdomain level (TLD first, then level 1, level 2, etc.), then by security priority within level
+	// This provides a clean hierarchical view: crusoe.ai → www.crusoe.ai → api.dev.crusoe.ai
 	baseDomain := data.Subdomain.Domain
 	baseLabels := strings.Count(baseDomain, ".") + 1
 
 	sort.Slice(details, func(i, j int) bool {
-		// Takeover risks first (security priority)
+		// First: subdomain level (lower levels first - TLD, then level 1, then level 2, etc.)
+		levelI := strings.Count(details[i].Name, ".") + 1 - baseLabels
+		levelJ := strings.Count(details[j].Name, ".") + 1 - baseLabels
+
+		// Handle base domain (level 0) - always first
+		if details[i].Name == baseDomain {
+			return true
+		}
+		if details[j].Name == baseDomain {
+			return false
+		}
+
+		if levelI != levelJ {
+			return levelI < levelJ
+		}
+
+		// Within same level: security priority (takeover risks first, then vulns)
 		if details[i].TakeoverRisk != details[j].TakeoverRisk {
 			return details[i].TakeoverRisk
 		}
-		// Then by vulnerability count (security priority)
 		if len(details[i].Vulns) != len(details[j].Vulns) {
 			return len(details[i].Vulns) > len(details[j].Vulns)
 		}
 		// Then by alive status
 		if details[i].IsAlive != details[j].IsAlive {
 			return details[i].IsAlive
-		}
-		// Then by subdomain level (lower levels first - level 1 before level 3)
-		levelI := strings.Count(details[i].Name, ".") + 1 - baseLabels
-		levelJ := strings.Count(details[j].Name, ".") + 1 - baseLabels
-		if levelI != levelJ {
-			return levelI < levelJ
 		}
 		// Finally alphabetically within same level
 		return details[i].Name < details[j].Name
@@ -516,17 +525,75 @@ var severityOrder = map[string]int{
 	"info":     4,
 }
 
-// sortVulnerabilitiesBySeverity sorts vulnerabilities from critical to info
+// sortVulnerabilitiesBySeverity sorts vulnerabilities by:
+// 1. Severity (critical > high > medium > low > info)
+// 2. Subdomain level (TLD first, then level 1, level 2, etc.)
+// 3. Alphabetically by host within same severity and level
 func sortVulnerabilitiesBySeverity(data *Data) {
 	if data.VulnScan == nil || len(data.VulnScan.Vulnerabilities) == 0 {
 		return
 	}
 
+	baseDomain := data.Target
+	baseLabels := strings.Count(baseDomain, ".") + 1 // example.com = 2 labels
+
 	sort.Slice(data.VulnScan.Vulnerabilities, func(i, j int) bool {
-		iOrder := severityOrder[strings.ToLower(data.VulnScan.Vulnerabilities[i].Severity)]
-		jOrder := severityOrder[strings.ToLower(data.VulnScan.Vulnerabilities[j].Severity)]
-		return iOrder < jOrder
+		vi := data.VulnScan.Vulnerabilities[i]
+		vj := data.VulnScan.Vulnerabilities[j]
+
+		// Primary sort: severity (lower order = higher priority)
+		iSeverity := severityOrder[strings.ToLower(vi.Severity)]
+		jSeverity := severityOrder[strings.ToLower(vj.Severity)]
+		if iSeverity != jSeverity {
+			return iSeverity < jSeverity
+		}
+
+		// Secondary sort: subdomain level (lower level = higher priority)
+		iHost := extractHostFromVuln(vi)
+		jHost := extractHostFromVuln(vj)
+		iLevel := getSubdomainLevel(iHost, baseLabels)
+		jLevel := getSubdomainLevel(jHost, baseLabels)
+		if iLevel != jLevel {
+			return iLevel < jLevel
+		}
+
+		// Tertiary sort: alphabetically by host
+		return iHost < jHost
 	})
+}
+
+// extractHostFromVuln extracts the hostname from a vulnerability's URL or Host field
+func extractHostFromVuln(v vulnscan.Vulnerability) string {
+	host := v.Host
+	if v.URL != "" {
+		// Extract host from URL
+		host = v.URL
+		host = strings.TrimPrefix(host, "http://")
+		host = strings.TrimPrefix(host, "https://")
+		if idx := strings.Index(host, "/"); idx > 0 {
+			host = host[:idx]
+		}
+		if idx := strings.Index(host, ":"); idx > 0 {
+			host = host[:idx]
+		}
+	}
+	return strings.ToLower(host)
+}
+
+// getSubdomainLevel calculates the subdomain depth relative to the base domain
+// Level 0: example.com (the TLD itself)
+// Level 1: api.example.com
+// Level 2: dev.api.example.com
+func getSubdomainLevel(host string, baseLabels int) int {
+	if host == "" {
+		return 999 // Unknown hosts sort last
+	}
+	hostLabels := strings.Count(host, ".") + 1
+	level := hostLabels - baseLabels
+	if level < 0 {
+		level = 0
+	}
+	return level
 }
 
 // mergeSecHeadersAsVulnerabilities converts security header findings into vulnerabilities
@@ -2956,47 +3023,133 @@ func Generate(data *Data, outputDir string) error {
 
                 <!-- DNS Security Tab -->
                 <div class="osint-content" id="osint-dns" style="display: none;">
+                {{if .SecHeaders.DNSSecurity}}
+                <div class="card" style="margin-bottom: 24px;">
+                    <div class="card-header">
+                        <span class="card-title">🌐 DNS Security Analysis</span>
+                        <span class="badge {{if ge .SecHeaders.DNSSecurity.Score 80}}success{{else if ge .SecHeaders.DNSSecurity.Score 50}}warning{{else}}danger{{end}}" style="margin-left: auto;">Score: {{.SecHeaders.DNSSecurity.Score}}/100</span>
+                    </div>
+                    <div class="card-body">
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px;">
+                            <!-- CAA Records -->
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">CAA Records</div>
+                                <div class="osint-stat-value">
+                                    {{if .SecHeaders.DNSSecurity.CAA.HasRecords}}
+                                    <span class="osint-status-ok">✓ Configured</span>
+                                    {{else}}
+                                    <span class="osint-status-missing">✗ Not Found</span>
+                                    {{end}}
+                                </div>
+                                <div class="osint-stat-detail">
+                                    {{if .SecHeaders.DNSSecurity.CAA.HasRecords}}
+                                    {{range .SecHeaders.DNSSecurity.CAA.Records}}
+                                    <div style="font-size: 0.75rem; color: var(--text-muted);">{{.Tag}}: {{.Value}}</div>
+                                    {{end}}
+                                    {{if .SecHeaders.DNSSecurity.CAA.HasReporting}}<span class="badge success" style="font-size: 0.65rem;">Has Reporting</span>{{end}}
+                                    {{else}}
+                                    Any CA can issue certificates for this domain
+                                    {{end}}
+                                </div>
+                            </div>
+                            <!-- DNSSEC -->
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">DNSSEC</div>
+                                <div class="osint-stat-value">
+                                    {{if .SecHeaders.DNSSecurity.DNSSEC.Enabled}}
+                                        {{if .SecHeaders.DNSSecurity.DNSSEC.Validated}}
+                                        <span class="osint-status-ok">✓ Enabled & Validated</span>
+                                        {{else}}
+                                        <span class="osint-status-warning">⚠ Enabled (Incomplete)</span>
+                                        {{end}}
+                                    {{else}}
+                                    <span class="osint-status-missing">✗ Not Enabled</span>
+                                    {{end}}
+                                </div>
+                                <div class="osint-stat-detail">
+                                    {{if .SecHeaders.DNSSecurity.DNSSEC.Enabled}}
+                                    Cryptographic DNS response validation
+                                    {{else}}
+                                    DNS responses can be spoofed
+                                    {{end}}
+                                </div>
+                            </div>
+                            <!-- Zone Transfer (AXFR) -->
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">Zone Transfer (AXFR)</div>
+                                <div class="osint-stat-value">
+                                    {{if .SecHeaders.DNSSecurity.ZoneTransfer.Vulnerable}}
+                                    <span class="osint-status-fail">⚠ VULNERABLE</span>
+                                    {{else}}
+                                    <span class="osint-status-ok">✓ Protected</span>
+                                    {{end}}
+                                </div>
+                                <div class="osint-stat-detail">
+                                    {{if .SecHeaders.DNSSecurity.ZoneTransfer.Vulnerable}}
+                                    <span style="color: var(--danger);">{{len .SecHeaders.DNSSecurity.ZoneTransfer.VulnerableNS}} NS allows transfer ({{.SecHeaders.DNSSecurity.ZoneTransfer.RecordsExposed}} records exposed)</span>
+                                    {{else}}
+                                    Zone transfer properly restricted
+                                    {{end}}
+                                </div>
+                            </div>
+                            <!-- Nameservers -->
+                            <div class="osint-stat-card">
+                                <div class="osint-stat-label">Nameservers</div>
+                                <div class="osint-stat-value">
+                                    {{if ge .SecHeaders.DNSSecurity.Nameservers.Count 2}}
+                                    <span class="osint-status-ok">{{.SecHeaders.DNSSecurity.Nameservers.Count}} NS</span>
+                                    {{else}}
+                                    <span class="osint-status-warning">{{.SecHeaders.DNSSecurity.Nameservers.Count}} NS (SPOF)</span>
+                                    {{end}}
+                                </div>
+                                <div class="osint-stat-detail">
+                                    {{range .SecHeaders.DNSSecurity.Nameservers.Servers}}
+                                    <div style="font-size: 0.7rem; color: var(--text-muted);">{{.}}</div>
+                                    {{end}}
+                                    {{if .SecHeaders.DNSSecurity.Nameservers.Diverse}}
+                                    <span class="badge success" style="font-size: 0.65rem;">Diverse Providers</span>
+                                    {{end}}
+                                    {{if .SecHeaders.DNSSecurity.Nameservers.DanglingNS}}
+                                    <span class="badge critical" style="font-size: 0.65rem;">⚠ Dangling NS Detected</span>
+                                    {{end}}
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- DNS Issues Summary -->
+                        {{$dnsIssues := 0}}
+                        {{if .SecHeaders.DNSSecurity.CAA.Issues}}{{$dnsIssues = len .SecHeaders.DNSSecurity.CAA.Issues}}{{end}}
+                        {{if gt $dnsIssues 0}}
+                        <div style="margin-top: 16px; padding: 12px; background: rgba(251, 191, 36, 0.1); border-radius: 8px; border-left: 3px solid var(--warning);">
+                            <strong>DNS Security Issues:</strong>
+                            <ul style="margin: 8px 0 0 16px; padding: 0;">
+                            {{range .SecHeaders.DNSSecurity.CAA.Issues}}
+                            <li style="font-size: 0.85rem; color: var(--text-secondary);">{{.}}</li>
+                            {{end}}
+                            {{range .SecHeaders.DNSSecurity.DNSSEC.Issues}}
+                            <li style="font-size: 0.85rem; color: var(--text-secondary);">{{.}}</li>
+                            {{end}}
+                            {{range .SecHeaders.DNSSecurity.Nameservers.Issues}}
+                            <li style="font-size: 0.85rem; color: var(--text-secondary);">{{.}}</li>
+                            {{end}}
+                            </ul>
+                        </div>
+                        {{end}}
+                    </div>
+                </div>
+                {{else}}
                 <div class="card" style="margin-bottom: 24px;">
                     <div class="card-header">
                         <span class="card-title">🌐 DNS Security Analysis</span>
                         <span class="badge info" style="margin-left: auto;">DNS Records</span>
                     </div>
                     <div class="card-body">
-                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
-                            <div class="osint-stat-card">
-                                <div class="osint-stat-label">CAA Records</div>
-                                <div class="osint-stat-value">
-                                    <span class="osint-status-na">Not yet implemented</span>
-                                </div>
-                                <div class="osint-stat-detail">Controls which CAs can issue certificates for this domain</div>
-                            </div>
-                            <div class="osint-stat-card">
-                                <div class="osint-stat-label">DNSSEC</div>
-                                <div class="osint-stat-value">
-                                    <span class="osint-status-na">Not yet implemented</span>
-                                </div>
-                                <div class="osint-stat-detail">Cryptographic signing of DNS records</div>
-                            </div>
-                            <div class="osint-stat-card">
-                                <div class="osint-stat-label">Zone Transfer (AXFR)</div>
-                                <div class="osint-stat-value">
-                                    <span class="osint-status-na">Not yet implemented</span>
-                                </div>
-                                <div class="osint-stat-detail">Checks if DNS zone transfer is allowed</div>
-                            </div>
-                            <div class="osint-stat-card">
-                                <div class="osint-stat-label">NS Records</div>
-                                <div class="osint-stat-value">
-                                    <span class="osint-status-na">Not yet implemented</span>
-                                </div>
-                                <div class="osint-stat-detail">Nameserver configuration and diversity</div>
-                            </div>
-                        </div>
-                        <div style="margin-top: 16px; padding: 12px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; font-size: 0.85rem; color: var(--text-secondary);">
-                            <strong>ℹ️ Coming Soon:</strong> DNS security tests (CAA, DNSSEC, AXFR, NS analysis) are planned for future releases. See dev-docs/tracking/OSINT_DNS_TESTS.md for implementation details.
+                        <div style="padding: 24px; text-align: center; color: var(--text-muted);">
+                            DNS security checks not performed for this scan
                         </div>
                     </div>
                 </div>
+                {{end}}
                 </div>
 
                 <!-- HTTP Headers Tab -->

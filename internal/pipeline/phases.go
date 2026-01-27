@@ -14,6 +14,7 @@ const (
 	PhaseTakeover   Phase = "takeover"   // Phase 5
 	PhaseHistoric   Phase = "historic"   // Phase 6
 	PhaseTech       Phase = "tech"       // Phase 7
+	PhaseJSAnalysis Phase = "jsanalysis" // Phase 7b (JavaScript Deep Analysis)
 	PhaseSecHeaders Phase = "secheaders" // Phase 8 (Security Headers Check)
 	PhaseDirBrute   Phase = "dirbrute"   // Phase 9
 	PhaseVulnScan   Phase = "vulnscan"   // Phase 10
@@ -31,6 +32,7 @@ var PhaseNumber = map[Phase]int{
 	PhaseTakeover:   5,
 	PhaseHistoric:   6,
 	PhaseTech:       7,
+	PhaseJSAnalysis: 7, // 7b - runs parallel with Tech
 	PhaseSecHeaders: 8,
 	PhaseDirBrute:   9,
 	PhaseVulnScan:   10,
@@ -48,6 +50,7 @@ var PhaseName = map[Phase]string{
 	PhaseTakeover:   "Subdomain Takeover Check",
 	PhaseHistoric:   "Historic URL Collection",
 	PhaseTech:       "Technology Detection",
+	PhaseJSAnalysis: "JavaScript Deep Analysis",
 	PhaseSecHeaders: "Security Headers Check",
 	PhaseDirBrute:   "Directory Bruteforce",
 	PhaseVulnScan:   "Vulnerability Scanning",
@@ -67,10 +70,11 @@ var PhaseDependencies = map[Phase][]Phase{
 	PhaseTakeover:   {PhaseSubdomain},
 	PhaseHistoric:   {}, // NO DEPENDENCY - runs parallel with Subdomain! Only needs root domain for gau/waybackurls/urlfinder
 	PhaseTech:       {PhasePorts},
+	PhaseJSAnalysis: {PhaseHistoric}, // Needs JS files list from historic URLs
 	PhaseSecHeaders: {PhasePorts}, // Needs alive hosts for header checking
 	PhaseDirBrute:   {PhasePorts}, // WAF is optional (used for filtering)
 	PhaseVulnScan:   {PhasePorts, PhaseHistoric, PhaseTech}, // Tech enables tech-aware scanning
-	PhaseScreenshot: {PhasePorts},                           // Needs alive hosts for screenshot URLs
+	PhaseScreenshot: {PhasePorts, PhaseTech},                 // Uses httpx results for HTTP-responding hosts
 	PhaseAIGuided:   {PhasePorts, PhaseTech, PhaseVulnScan, PhaseSecHeaders}, // SecHeaders for summary
 }
 
@@ -84,6 +88,7 @@ var PhaseProduces = map[Phase][]string{
 	PhaseTakeover:   {"vulnerable_subs"},
 	PhaseHistoric:   {"urls", "categorized_urls", "extracted_subdomains"},
 	PhaseTech:       {"tech_by_host", "tech_count"},
+	PhaseJSAnalysis: {"endpoints", "dom_xss_sinks", "secrets", "js_files_analyzed"},
 	PhaseSecHeaders: {"header_findings", "email_security", "misconfig_vulns"},
 	PhaseDirBrute:   {"discoveries"},
 	PhaseVulnScan:   {"vulnerabilities"},
@@ -107,6 +112,7 @@ func GetAllPhases() []Phase {
 		PhaseTakeover,
 		PhaseHistoric,
 		PhaseTech,
+		PhaseJSAnalysis,
 		PhaseSecHeaders,
 		PhaseDirBrute,
 		PhaseVulnScan,
