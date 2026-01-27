@@ -7,11 +7,13 @@ This guide covers all configuration options for Reconator, including API keys, t
 ## Table of Contents
 
 - [Installation](#installation)
+- [Unified API Key Management](#unified-api-key-management) **(NEW in v0.1.2)**
 - [API Keys Setup](#api-keys-setup)
 - [Subfinder Provider Configuration](#subfinder-provider-configuration)
 - [AI Provider Configuration](#ai-provider-configuration)
 - [Notification Configuration](#notification-configuration)
 - [Custom Wordlists and Resolvers](#custom-wordlists-and-resolvers)
+- [ExploitDB Integration (Optional)](#exploitdb-integration-optional) **(NEW in v0.1.2)**
 - [Command Line Reference](#command-line-reference)
 - [Environment Variables](#environment-variables)
 
@@ -55,6 +57,122 @@ pipx install xnLinkFinder
 cargo install feroxbuster
 # Or download from GitHub releases
 ```
+
+---
+
+## Unified API Key Management
+
+**New in v0.1.2**: Reconator now provides unified API key management. Configure all your API keys in one place and sync them to tool-specific configs automatically.
+
+### Quick Start
+
+```bash
+# Initialize config file (creates template)
+reconator config init
+
+# Edit the config file
+nano ~/.reconator/config.yaml
+
+# Sync keys to subfinder, notify, etc.
+reconator config sync
+
+# Validate your keys
+reconator config test
+
+# Show current configuration
+reconator config show
+```
+
+### Config File Location
+
+```
+~/.reconator/config.yaml    # Single source of truth
+```
+
+This config is automatically synced to:
+- `~/.config/subfinder/provider-config.yaml` (OSINT keys)
+- `~/.config/notify/provider-config.yaml` (notification webhooks)
+
+### Example Configuration
+
+```yaml
+# ~/.reconator/config.yaml - Single source of truth for ALL keys
+
+# ============================================================================
+# AI PROVIDER KEYS (for AI-guided scanning)
+# ============================================================================
+ai:
+  openai:
+    - "sk-YOUR_OPENAI_KEY"
+  claude:
+    - "sk-ant-YOUR_CLAUDE_KEY"
+  gemini:
+    - "YOUR_GEMINI_KEY"
+  groq:
+    - "gsk_YOUR_GROQ_KEY"
+  deepseek:
+    - "sk-YOUR_DEEPSEEK_KEY"
+  ollama:
+    url: "http://localhost:11434"
+    model: "qwen2.5:32b"
+
+# ============================================================================
+# PROJECTDISCOVERY CLOUD
+# ============================================================================
+pdcp_api_key: "pdcp_xxxxxxxxxxxx"
+
+# ============================================================================
+# OSINT API KEYS (synced to subfinder)
+# ============================================================================
+osint:
+  securitytrails:
+    - "your-securitytrails-key"
+  shodan:
+    - "your-shodan-key"
+  censys:
+    - "api_id:api_secret"  # Censys format
+  virustotal:
+    - "your-virustotal-key"
+  github:
+    - "ghp_xxxxxxxxxxxx"
+  chaos:
+    - "pdcp_xxxxxxxxxxxx"
+
+# ============================================================================
+# NOTIFICATION PROVIDERS (synced to notify)
+# ============================================================================
+notify:
+  slack:
+    - id: "recon-alerts"
+      slack_webhook_url: "https://hooks.slack.com/services/XXX/XXX/XXX"
+      slack_channel: "recon-alerts"
+      slack_username: "reconator"
+  discord:
+    - id: "recon-alerts"
+      discord_webhook_url: "https://discord.com/api/webhooks/XXX/XXX"
+```
+
+### Config Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `reconator config init` | Create template config file |
+| `reconator config show` | Display current configuration (keys masked) |
+| `reconator config sync` | Sync keys to subfinder, notify configs |
+| `reconator config test` | Validate API keys by testing endpoints |
+| `reconator config test --osint` | Test only OSINT keys |
+
+### Benefits
+
+| Benefit | Description |
+|---------|-------------|
+| **Single source of truth** | Configure ALL keys (AI, OSINT, notify) in one file |
+| **Auto-create on install** | Config created with key import during `reconator install` |
+| **Auto-import** | Imports existing keys from subfinder, notify, ai-config |
+| **Auto-sync** | Keys synced to tool configs automatically |
+| **Merge approach** | Preserves manual edits in tool configs |
+| **Key validation** | Test keys before scanning |
+| **Secure storage** | Config file has restricted permissions (0600) |
 
 ---
 
@@ -201,52 +319,43 @@ AI providers are used for smart nuclei template selection and vulnerability chai
 | 5 | OpenAI | `OPENAI_API_KEY` | https://platform.openai.com/api-keys | Reliable |
 | 6 | Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey | Google AI |
 
-### Setup Option 1: Config File (Recommended)
+### Smart Provider Selection
 
-Create `~/.reconator/ai-config.yaml`:
+Reconator intelligently skips unavailable providers:
+
+| Condition | Behavior |
+|-----------|----------|
+| **Ollama not running** | Skipped in ~3ms (quick reachability check) |
+| **Placeholder keys** | Keys containing `YOUR_` or `_KEY` are skipped |
+| **Empty keys** | Providers with no keys are skipped |
+| **Rate limited** | Automatically rotates to next key or provider |
+
+This means if you only have OpenAI configured, reconator will use it immediately without waiting for Ollama timeouts.
+
+### Setup Option 1: Unified Config File (Recommended)
+
+Add AI keys to `~/.reconator/config.yaml` (created automatically):
 
 ```yaml
-providers:
-  # Ollama - Local AI (FREE, PRIVATE, NO API KEY)
-  - name: ollama
-    endpoint: "http://localhost:11434"
+# AI section in ~/.reconator/config.yaml
+ai:
+  # Ollama - Local AI (FREE, PRIVATE)
+  # Only used if Ollama is actually running
+  ollama:
+    url: "http://localhost:11434"
     model: "qwen2.5:32b"
-    keys: []
 
-  # Groq - Fast inference, generous free tier
-  - name: groq
-    keys:
-      - "gsk_YOUR_GROQ_KEY"
-    model: "llama-3.1-70b-versatile"
-    rpm_limit: 30
-
-  # DeepSeek - Cheap and good quality
-  - name: deepseek
-    keys:
-      - "sk-YOUR_DEEPSEEK_KEY"
-    model: "deepseek-chat"
-    rpm_limit: 60
-
-  # Claude - Best quality for security analysis
-  - name: claude
-    keys:
-      - "sk-ant-YOUR_CLAUDE_KEY"
-    model: "claude-sonnet-4-20250514"
-    rpm_limit: 50
-
-  # OpenAI - Reliable fallback
-  - name: openai
-    keys:
-      - "sk-YOUR_OPENAI_KEY"
-    model: "gpt-4o-mini"
-    rpm_limit: 60
-
-  # Gemini - Google AI
-  - name: gemini
-    keys:
-      - "YOUR_GEMINI_KEY"
-    model: "gemini-1.5-flash"
-    rpm_limit: 60
+  # Cloud providers - add your keys here
+  openai:
+    - "sk-your-openai-key"
+  claude:
+    - "sk-ant-your-claude-key"
+  gemini:
+    - "your-gemini-key"
+  groq:
+    - "gsk_your-groq-key"
+  deepseek:
+    - "sk-your-deepseek-key"
 ```
 
 ### Setup Option 2: Environment Variables
@@ -419,6 +528,56 @@ wget https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt \
   -O ~/.reconator/wordlists/resolvers.txt
 ```
 
+### Resolver Types
+
+Reconator uses two resolver files:
+
+| File | Count | Used By | Purpose |
+|------|-------|---------|---------|
+| `resolvers.txt` | ~18k | puredns bruteforce | Wide distribution for DNS bruteforce |
+| `trusted-resolvers.txt` | ~25 | dnsx validation | Reliable servers for validation |
+
+The trusted resolvers are auto-created on first scan with reliable public DNS servers (Cloudflare, Google, Quad9, etc.) to prevent false positives during DNS validation.
+
+---
+
+## ExploitDB Integration (Optional)
+
+**New in v0.1.2**: Reconator can query ExploitDB via searchsploit for known exploits matching detected technologies.
+
+### Installation
+
+```bash
+# Ubuntu/Debian/Kali
+sudo apt update
+sudo apt install exploitdb
+
+# Update the exploit database
+searchsploit -u
+```
+
+### How It Works
+
+When searchsploit is installed, the hybrid CVE detection system will:
+1. Query ExploitDB for detected product/version combinations
+2. Extract CVE IDs from exploit titles
+3. Report available exploits with severity based on type (remote/webapps = high)
+
+### Example Output
+
+```
+[HIGH] ExploitDB: PHP 5.6 - Remote Code Execution
+  Type: remote | Platform: php
+  Exploit path: /usr/share/exploitdb/exploits/php/webapps/12345.py
+```
+
+### Verification
+
+```bash
+# Test searchsploit is working
+searchsploit -j "apache 2.4"
+```
+
 ---
 
 ## Command Line Reference
@@ -469,17 +628,60 @@ reconator check
 # Shows status of all required and optional tools
 ```
 
+### Config Command
+
+```bash
+reconator config [subcommand]
+
+Subcommands:
+  init   - Create template config file (~/.reconator/config.yaml)
+  show   - Display current configuration (keys masked)
+  sync   - Sync API keys to tool configs (subfinder, notify)
+  test   - Validate API keys by testing endpoints
+
+Flags (for test):
+      --osint   Test only OSINT API keys
+      --notify  Test notification webhooks (sends test message)
+
+Examples:
+  reconator config init              # Create template
+  reconator config show              # Show config
+  reconator config sync              # Sync to tools
+  reconator config test              # Validate all keys
+  reconator config test --osint      # Validate OSINT keys only
+```
+
 ---
 
 ## Environment Variables
+
+### AI Providers
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
 | `ANTHROPIC_API_KEY` | Claude API key | `sk-ant-...` |
 | `GEMINI_API_KEY` | Gemini API key | `...` |
-| `PDCP_API_KEY` | ProjectDiscovery Cloud key | `...` |
-| `SUBFINDER_API_KEYS` | Subfinder providers | `source:key,source:key` |
+| `GROQ_API_KEY` | Groq API key | `gsk_...` |
+| `DEEPSEEK_API_KEY` | DeepSeek API key | `sk-...` |
+
+### OSINT Providers
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `PDCP_API_KEY` | ProjectDiscovery Cloud key | `pdcp_...` |
+| `SHODAN_API_KEY` | Shodan API key | `...` |
+| `SECURITYTRAILS_API_KEY` | SecurityTrails API key | `...` |
+| `VIRUSTOTAL_API_KEY` | VirusTotal API key | `...` |
+| `CENSYS_API_KEY` | Censys API key | `api_id:api_secret` |
+| `GITHUB_TOKEN` | GitHub personal access token | `ghp_...` |
+| `CHAOS_API_KEY` | Chaos (ProjectDiscovery) key | `pdcp_...` |
+| `BINARYEDGE_API_KEY` | BinaryEdge API key | `...` |
+| `HUNTER_API_KEY` | Hunter.io API key | `...` |
+| `INTELX_API_KEY` | IntelX API key | `...` |
+| `URLSCAN_API_KEY` | URLScan API key | `...` |
+
+**Note**: Environment variables override values in `~/.reconator/config.yaml`.
 
 ---
 

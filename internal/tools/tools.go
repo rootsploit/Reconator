@@ -87,6 +87,7 @@ func GoTools() []Tool {
 
 		// XSS scanning
 		{"dalfox", "dalfox", "github.com/hahwul/dalfox/v2@latest", false},
+		{"sxss", "sxss", "github.com/unstabl3/sxss@latest", false}, // Fast XSS reflection scanner (kxss alternative)
 
 		// Screenshots
 		{"gowitness", "gowitness", "github.com/sensepost/gowitness@latest", false},

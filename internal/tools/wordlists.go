@@ -28,9 +28,71 @@ func WordlistDir() string {
 	return filepath.Join(home, ".reconator", "wordlists")
 }
 
-// ResolversFile returns the path to the resolvers file
+// ResolversFile returns the path to the resolvers file (large list for bruteforce)
 func ResolversFile() string {
 	return filepath.Join(WordlistDir(), "resolvers.txt")
+}
+
+// TrustedResolversFile returns the path to trusted resolvers (small list for validation)
+func TrustedResolversFile() string {
+	return filepath.Join(WordlistDir(), "trusted-resolvers.txt")
+}
+
+// CreateTrustedResolvers creates a file with reliable public DNS resolvers
+// These are well-known, fast, and reliable for DNS validation
+func CreateTrustedResolvers() error {
+	dir := WordlistDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	path := TrustedResolversFile()
+
+	// Skip if already exists
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+
+	// Curated list of reliable public DNS resolvers
+	// These are fast, reliable, and don't rate-limit aggressively
+	resolvers := `# Trusted DNS Resolvers for validation
+# Cloudflare (fastest, most reliable)
+1.1.1.1
+1.0.0.1
+# Google Public DNS
+8.8.8.8
+8.8.4.4
+# Quad9 (security-focused)
+9.9.9.9
+149.112.112.112
+# OpenDNS
+208.67.222.222
+208.67.220.220
+# Cloudflare for Families
+1.1.1.2
+1.0.0.2
+# Level3/Lumen
+4.2.2.1
+4.2.2.2
+# Verisign
+64.6.64.6
+64.6.65.6
+# AdGuard DNS
+94.140.14.14
+94.140.15.15
+# CleanBrowsing
+185.228.168.9
+185.228.169.9
+# Comodo Secure DNS
+8.26.56.26
+8.20.247.20
+# Neustar UltraDNS
+64.6.64.6
+156.154.70.1
+# Hurricane Electric
+74.82.42.42
+`
+	return os.WriteFile(path, []byte(resolvers), 0644)
 }
 
 // SubdomainWordlist returns paths to check for subdomain wordlists (in priority order)
@@ -233,7 +295,7 @@ func FindWordlist() string {
 	return ""
 }
 
-// FindResolvers finds the resolvers file
+// FindResolvers finds the resolvers file (large list for bruteforce)
 func FindResolvers() string {
 	paths := []string{
 		ResolversFile(),
@@ -246,4 +308,24 @@ func FindResolvers() string {
 		}
 	}
 	return ""
+}
+
+// FindTrustedResolvers finds or creates the trusted resolvers file (for validation)
+func FindTrustedResolvers() string {
+	path := TrustedResolversFile()
+
+	// Create if doesn't exist
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := CreateTrustedResolvers(); err != nil {
+			// Fall back to regular resolvers if creation fails
+			return FindResolvers()
+		}
+	}
+
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+
+	// Fall back to regular resolvers
+	return FindResolvers()
 }

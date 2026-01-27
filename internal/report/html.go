@@ -3369,7 +3369,7 @@ func Generate(data *Data, outputDir string) error {
                                     <td><span class="severity-badge {{.Severity}}">{{.Severity}}</span></td>
                                     <td><code>{{.SourceType}}</code> (line {{.SourceLine}})</td>
                                     <td><code>{{.SinkType}}</code> (line {{.SinkLine}})</td>
-                                    <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.File}}">{{.File}}</td>
+                                    <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.File}}"><a href="{{.File}}" target="_blank" style="color: var(--accent); text-decoration: none;">{{.File}}</a></td>
                                     <td>{{.Description}}</td>
                                 </tr>
                                 {{end}}
@@ -3400,7 +3400,7 @@ func Generate(data *Data, outputDir string) error {
                                     <td><code>{{.Type}}</code></td>
                                     <td><span class="tag">{{.Category}}</span></td>
                                     <td>{{if eq .Controllability "full"}}<span style="color: var(--critical);">Full</span>{{else}}<span style="color: var(--warning);">Partial</span>{{end}}</td>
-                                    <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}">{{.Source}}</td>
+                                    <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}"><a href="{{.Source}}" target="_blank" style="color: var(--accent); text-decoration: none;">{{.Source}}</a></td>
                                     <td>{{.Line}}</td>
                                 </tr>
                                 {{end}}
@@ -3431,7 +3431,7 @@ func Generate(data *Data, outputDir string) error {
                                     <td><span class="severity-badge {{.Severity}}">{{.Severity}}</span></td>
                                     <td><code>{{.Type}}</code></td>
                                     <td>{{if .HasInput}}<span style="color: var(--critical);">Yes</span>{{else}}<span style="color: var(--text-muted);">No</span>{{end}}</td>
-                                    <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}">{{.Source}}</td>
+                                    <td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}"><a href="{{.Source}}" target="_blank" style="color: var(--accent); text-decoration: none;">{{.Source}}</a></td>
                                     <td>{{.Line}}</td>
                                 </tr>
                                 {{end}}
@@ -3459,7 +3459,7 @@ func Generate(data *Data, outputDir string) error {
                                 <tr>
                                     <td><code>{{.Path}}</code></td>
                                     <td>{{if .Sensitive}}<span style="color: var(--warning);">Yes</span>{{else}}<span style="color: var(--text-muted);">No</span>{{end}}</td>
-                                    <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}">{{.Source}}</td>
+                                    <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}"><a href="{{.Source}}" target="_blank" style="color: var(--accent); text-decoration: none;">{{.Source}}</a></td>
                                 </tr>
                                 {{end}}
                             </tbody>
@@ -3486,7 +3486,7 @@ func Generate(data *Data, outputDir string) error {
                                 <tr>
                                     <td><span class="tag">{{.Type}}</span></td>
                                     <td><code>{{.Value}}</code></td>
-                                    <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}">{{.Source}}</td>
+                                    <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{.Source}}"><a href="{{.Source}}" target="_blank" style="color: var(--accent); text-decoration: none;">{{.Source}}</a></td>
                                 </tr>
                                 {{end}}
                             </tbody>

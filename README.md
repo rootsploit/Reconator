@@ -16,7 +16,7 @@
   <a href="#-features">Features</a> •
   <a href="#-installation">Install</a> •
   <a href="#-quick-start">Quick Start</a> •
-  <a href="#-comparison">Comparison</a>
+  <a href="#-changelog">Changelog</a>
 </p>
 
 ---
@@ -121,6 +121,20 @@ go install github.com/rootsploit/reconator@latest
 reconator install --extras
 ```
 
+### From Releases
+
+Download pre-built binaries from [GitHub Releases](https://github.com/rootsploit/reconator/releases).
+
+### Docker
+
+```bash
+# Pull from Docker Hub
+docker pull rootsploit/reconator:latest
+
+# Run a scan
+docker run --rm -v $(pwd)/results:/home/reconator/results rootsploit/reconator scan target.com
+```
+
 ### From Source
 
 ```bash
@@ -151,6 +165,23 @@ reconator scan -l targets.txt
 # Passive mode
 reconator scan target.com --passive
 ```
+
+### ⚙️ Configuration
+
+Reconator uses a unified config file (`~/.reconator/config.yaml`) for ALL API keys:
+
+```bash
+# Show current configuration
+reconator config show
+
+# Sync keys to subfinder/notify
+reconator config sync
+
+# Validate your API keys
+reconator config test
+```
+
+See [Configuration Guide](docs/CONFIGURATION.md) for detailed setup.
 
 ---
 
@@ -203,6 +234,30 @@ Contributions are welcome!
 3. Submit a pull request
 
 **Found this useful?** A star helps others discover Reconator.
+
+---
+
+## 📋 Changelog
+
+### v0.1.2 - Hybrid CVE Detection & Fast XSS Scanning
+- **sxss XSS Scanner**: Fast XSS reflection scanning (150 concurrent threads)
+- **Hybrid CVE Detection**: vulnx → NVD API → hardcoded → searchsploit
+- **ExploitDB Integration**: Optional searchsploit support for exploit lookup
+- **JS Analysis**: Clickable file paths in HTML report
+- **DNS Fix**: Trusted resolvers for dnsx validation (prevents false positives)
+
+### v0.1.1 - DNS Validation & Historic URL Fixes
+- Fixed DNS validation false positives with unreliable resolvers
+- Created trusted-resolvers.txt for reliable validation
+- Fixed historic subdomain merging
+
+### v0.1.0 - Initial Release
+- 12-phase reconnaissance pipeline
+- Multi-provider AI support (Ollama, Groq, Claude, OpenAI, Gemini)
+- Unified config management
+- Interactive HTML reports
+
+[Full Changelog](docs/USAGE.md#changelog)
 
 ---
 

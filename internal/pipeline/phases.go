@@ -65,9 +65,9 @@ var PhaseDependencies = map[Phase][]Phase{
 	PhaseIPRange:    {}, // No dependencies - entry point for IP/ASN targets
 	PhaseSubdomain:  {PhaseIPRange}, // Soft dep: loads TLDs from IPRange for ASN targets
 	PhaseWAF:        {PhasePorts},     // WAF needs alive hosts from ports for CDN detection
-	PhasePorts:      {PhaseSubdomain}, // Ports needs subdomains to scan
+	PhasePorts:      {PhaseSubdomain, PhaseHistoric}, // Ports needs subdomains + historic extracted subdomains (MERGED)
 	PhaseVHost:      {PhasePorts},     // Needs alive hosts for VHost fuzzing
-	PhaseTakeover:   {PhaseSubdomain},
+	PhaseTakeover:   {PhaseSubdomain, PhaseHistoric}, // Check both subdomain and historic-extracted subs for takeover
 	PhaseHistoric:   {}, // NO DEPENDENCY - runs parallel with Subdomain! Only needs root domain for gau/waybackurls/urlfinder
 	PhaseTech:       {PhasePorts},
 	PhaseJSAnalysis: {PhaseHistoric}, // Needs JS files list from historic URLs

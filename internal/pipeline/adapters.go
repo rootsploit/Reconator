@@ -3,7 +3,9 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/rootsploit/reconator/internal/aiguided"
@@ -223,7 +225,25 @@ func (a *PortsAdapter) Execute(ctx context.Context, input *PhaseInput) (*PhaseRe
 		result.Duration = result.EndTime.Sub(start)
 		return result, nil
 	}
-	fmt.Printf("        [PortsAdapter] Starting scan with %d subdomains\n", len(input.Subdomains))
+
+	// Log the subdomain sources
+	fmt.Printf("        [PortsAdapter] Starting scan with %d subdomains", len(input.Subdomains))
+	if len(input.ExtractedSubdomains) > 0 {
+		fmt.Printf(" (includes %d historic-extracted)", len(input.ExtractedSubdomains))
+	}
+	fmt.Println()
+
+	// Save the merged subdomains list to file for visibility and downstream use
+	if input.Config != nil && len(input.ExtractedSubdomains) > 0 {
+		mergedPath := filepath.Join(input.Config.OutputDir, input.Target, "1-subdomains", "merged_subdomains.txt")
+		if f, err := os.Create(mergedPath); err == nil {
+			for _, s := range input.Subdomains {
+				f.WriteString(s + "\n")
+			}
+			f.Close()
+			fmt.Printf("        [PortsAdapter] Saved merged subdomains to: %s\n", mergedPath)
+		}
+	}
 
 	res, err := a.scanner.Scan(input.Subdomains)
 	result.EndTime = time.Now()
@@ -501,12 +521,18 @@ func (a *SecHeadersAdapter) Execute(ctx context.Context, input *PhaseInput) (*Ph
 
 // VulnScanAdapter wraps vulnscan.Scanner as a PhaseExecutor
 type VulnScanAdapter struct {
-	scanner *vulnscan.Scanner
+	scanner   *vulnscan.Scanner
+	collector *historic.Collector // For running katana when alive hosts available
+	cfg       *config.Config
+	checker   *tools.Checker
 }
 
 func NewVulnScanAdapter(cfg *config.Config, checker *tools.Checker) *VulnScanAdapter {
 	return &VulnScanAdapter{
-		scanner: vulnscan.NewScanner(cfg, checker),
+		scanner:   vulnscan.NewScanner(cfg, checker),
+		collector: historic.NewCollector(cfg, checker),
+		cfg:       cfg,
+		checker:   checker,
 	}
 }
 
@@ -529,11 +555,62 @@ func (a *VulnScanAdapter) Execute(ctx context.Context, input *PhaseInput) (*Phas
 	}
 	fmt.Printf("        [VulnScanAdapter] Starting scan with %d alive hosts\n", len(input.AliveHosts))
 
+	// CRITICAL FIX: Run katana active crawl now that alive hosts are available
+	// Historic phase runs at Level 0 (parallel with Subdomain) so katana was skipped
+	var allURLs []string
+	if len(input.URLs) > 0 {
+		allURLs = append(allURLs, input.URLs...)
+	}
+
+	// Run katana to actively crawl live hosts and discover fresh endpoints
+	if !a.cfg.PassiveMode && a.checker.IsInstalled("katana") {
+		fmt.Println("        [VulnScan] Running katana active crawl on alive hosts...")
+		mergedURLs, mergedCategorized, _ := a.collector.RunKatanaAndMerge(input.AliveHosts, allURLs, input.Target)
+		allURLs = mergedURLs
+		fmt.Printf("        [VulnScan] Total URLs after katana merge: %d\n", len(allURLs))
+
+		// Update categorized URLs with fresh data
+		if input.CategorizedURLs == nil {
+			input.CategorizedURLs = &CategorizedURLs{}
+		}
+		input.CategorizedURLs.XSS = mergedCategorized.XSS
+		input.CategorizedURLs.SQLi = mergedCategorized.SQLi
+		input.CategorizedURLs.SSRF = mergedCategorized.SSRF
+		input.CategorizedURLs.LFI = mergedCategorized.LFI
+		input.CategorizedURLs.RCE = mergedCategorized.RCE
+		input.CategorizedURLs.SSTI = mergedCategorized.SSTI
+		input.CategorizedURLs.Redirect = mergedCategorized.Redirect
+		input.CategorizedURLs.Debug = mergedCategorized.Debug
+		input.CategorizedURLs.JSFiles = mergedCategorized.JSFiles
+		input.CategorizedURLs.APIFiles = mergedCategorized.APIFiles
+		input.CategorizedURLs.Sensitive = mergedCategorized.Sensitive
+	}
+
+	// CRITICAL FIX: Extract ALL URLs with query parameters for XSS fuzzing
+	// Don't rely only on XSS pattern matching - fuzz any URL with parameters
+	allParamURLs := extractURLsWithParams(allURLs)
+	fmt.Printf("        [VulnScan] URLs with parameters for fuzzing: %d\n", len(allParamURLs))
+
 	// Convert pipeline.CategorizedURLs to historic.CategorizedURLs
 	var categorized *historic.CategorizedURLs
 	if input.CategorizedURLs != nil {
+		// Merge all parameter URLs into XSS category for comprehensive fuzzing
+		xssURLs := input.CategorizedURLs.XSS
+		if len(allParamURLs) > 0 {
+			// Add all param URLs to XSS for fuzzing (deduplicated)
+			seen := make(map[string]bool)
+			for _, u := range xssURLs {
+				seen[u] = true
+			}
+			for _, u := range allParamURLs {
+				if !seen[u] {
+					xssURLs = append(xssURLs, u)
+					seen[u] = true
+				}
+			}
+		}
 		categorized = &historic.CategorizedURLs{
-			XSS:       input.CategorizedURLs.XSS,
+			XSS:       xssURLs, // Now includes ALL parameter URLs
 			SQLi:      input.CategorizedURLs.SQLi,
 			SSRF:      input.CategorizedURLs.SSRF,
 			LFI:       input.CategorizedURLs.LFI,
@@ -545,6 +622,13 @@ func (a *VulnScanAdapter) Execute(ctx context.Context, input *PhaseInput) (*Phas
 			APIFiles:  input.CategorizedURLs.APIFiles,
 			Sensitive: input.CategorizedURLs.Sensitive,
 		}
+		fmt.Printf("        [VulnScan] XSS fuzzing targets: %d URLs\n", len(categorized.XSS))
+	} else if len(allParamURLs) > 0 {
+		// No categorized URLs from historic, but we have param URLs - create category
+		categorized = &historic.CategorizedURLs{
+			XSS: allParamURLs,
+		}
+		fmt.Printf("        [VulnScan] Created XSS category with %d param URLs\n", len(allParamURLs))
 	}
 
 	// Build tech input for tech-aware scanning
@@ -553,6 +637,23 @@ func (a *VulnScanAdapter) Execute(ctx context.Context, input *PhaseInput) (*Phas
 		techInput = &vulnscan.TechInput{
 			TechByHost: input.TechByHost,
 			TechCount:  input.TechCount,
+		}
+	}
+
+	// Save XSS candidate URLs to file for manual testing
+	// This allows security researchers to run their own tools on these URLs
+	if categorized != nil && len(categorized.XSS) > 0 && input.Config != nil {
+		xssDir := filepath.Join(input.Config.OutputDir, input.Target, "8-vulnscan", "xss-testing")
+		if err := os.MkdirAll(xssDir, 0755); err == nil {
+			// Save all XSS candidate URLs
+			xssInputFile := filepath.Join(xssDir, "xss_candidate_urls.txt")
+			if f, err := os.Create(xssInputFile); err == nil {
+				for _, u := range categorized.XSS {
+					f.WriteString(u + "\n")
+				}
+				f.Close()
+				fmt.Printf("        [VulnScan] Saved %d XSS candidate URLs to: %s\n", len(categorized.XSS), xssInputFile)
+			}
 		}
 	}
 
@@ -567,9 +668,86 @@ func (a *VulnScanAdapter) Execute(ctx context.Context, input *PhaseInput) (*Phas
 		return result, err
 	}
 
+	// Save XSS results to separate files by tool for manual verification
+	if res != nil && input.Config != nil {
+		xssDir := filepath.Join(input.Config.OutputDir, input.Target, "8-vulnscan", "xss-testing")
+		if err := os.MkdirAll(xssDir, 0755); err == nil {
+			// Separate vulnerabilities by tool
+			dalfoxResults := []string{}
+			sxssResults := []string{}
+			quicktestResults := []string{}
+
+			for _, v := range res.Vulnerabilities {
+				if v.Type == "xss" || strings.Contains(strings.ToLower(v.Name), "xss") {
+					switch v.Tool {
+					case "dalfox":
+						dalfoxResults = append(dalfoxResults, v.URL)
+					case "sxss":
+						sxssResults = append(sxssResults, v.URL)
+					case "quicktest":
+						quicktestResults = append(quicktestResults, v.URL)
+					}
+				}
+			}
+
+			// Save dalfox results
+			if len(dalfoxResults) > 0 {
+				f, _ := os.Create(filepath.Join(xssDir, "dalfox_vulnerable.txt"))
+				if f != nil {
+					for _, u := range dalfoxResults {
+						f.WriteString(u + "\n")
+					}
+					f.Close()
+					fmt.Printf("        [VulnScan] Saved %d dalfox XSS findings to: dalfox_vulnerable.txt\n", len(dalfoxResults))
+				}
+			}
+
+			// Save sxss results
+			if len(sxssResults) > 0 {
+				f, _ := os.Create(filepath.Join(xssDir, "sxss_reflections.txt"))
+				if f != nil {
+					for _, u := range sxssResults {
+						f.WriteString(u + "\n")
+					}
+					f.Close()
+					fmt.Printf("        [VulnScan] Saved %d sxss reflection findings to: sxss_reflections.txt\n", len(sxssResults))
+				}
+			}
+
+			// Save quicktest results
+			if len(quicktestResults) > 0 {
+				f, _ := os.Create(filepath.Join(xssDir, "quicktest_xss.txt"))
+				if f != nil {
+					for _, u := range quicktestResults {
+						f.WriteString(u + "\n")
+					}
+					f.Close()
+					fmt.Printf("        [VulnScan] Saved %d quicktest XSS findings to: quicktest_xss.txt\n", len(quicktestResults))
+				}
+			}
+		}
+	}
+
 	result.Status = StatusCompleted
 	result.Data = res
 	return result, nil
+}
+
+// extractURLsWithParams extracts all URLs that have query parameters
+// These are candidates for XSS, SQLi, and other injection testing
+func extractURLsWithParams(urls []string) []string {
+	var result []string
+	seen := make(map[string]bool)
+	for _, u := range urls {
+		// URL has parameters if it contains "?" followed by "="
+		if strings.Contains(u, "?") && strings.Contains(u, "=") {
+			if !seen[u] {
+				seen[u] = true
+				result = append(result, u)
+			}
+		}
+	}
+	return result
 }
 
 // ScreenshotAdapter wraps screenshot.Capturer as a PhaseExecutor

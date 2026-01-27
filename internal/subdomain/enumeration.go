@@ -244,6 +244,30 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		}
 		return true
 	})
+
+	// CRITICAL FIX: Always include root domain and www variant as base targets
+	// These are often missed by enumeration tools but are essential scan targets
+	rootDomain := domain
+	wwwDomain := "www." + domain
+	hasRoot := false
+	hasWww := false
+	for _, s := range all {
+		if s == rootDomain {
+			hasRoot = true
+		}
+		if s == wwwDomain {
+			hasWww = true
+		}
+	}
+	if !hasRoot {
+		all = append(all, rootDomain)
+		fmt.Printf("        added root domain: %s\n", rootDomain)
+	}
+	if !hasWww {
+		all = append(all, wwwDomain)
+		fmt.Printf("        added www variant: %s\n", wwwDomain)
+	}
+
 	sort.Strings(all)
 
 	// Store all subdomains before validation (for takeover check on dangling DNS)
@@ -558,7 +582,7 @@ func (e *Enumerator) validate(subs []string) []string {
 	// Prefer dnsx for validation - it reliably outputs to stdout
 	if e.c.IsInstalled("dnsx") {
 		// Optimized dnsx flags for fast mass resolution:
-		// - Use resolvers file (CRITICAL - system DNS is 10x slower)
+		// - Use TRUSTED resolvers (reliable public DNS) for validation
 		// - High thread count for parallel resolution
 		// - Skip -cname and -wd for pure validation speed (takeover phase does its own CNAME check)
 		args := []string{
@@ -567,10 +591,12 @@ func (e *Enumerator) validate(subs []string) []string {
 			"-resp", // Still need response to confirm resolution
 		}
 
-		// CRITICAL FIX: Use resolvers file - without this, dnsx uses system DNS which is 10x slower
+		// CRITICAL FIX: Use TRUSTED resolvers for validation (not the full 17k+ list)
+		// Trusted resolvers are reliable public DNS servers that give consistent results
 		resolvers := e.cfg.ResolversFile
 		if resolvers == "" {
-			resolvers = tools.FindResolvers()
+			// Prefer trusted resolvers for validation (smaller, more reliable)
+			resolvers = tools.FindTrustedResolvers()
 		}
 		if resolvers != "" {
 			args = append(args, "-r", resolvers)

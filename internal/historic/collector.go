@@ -409,8 +409,22 @@ func ExtractEndpoints(urls []string) []string {
 func (c *Collector) CategorizeURLs(urls []string) CategorizedURLs {
 	cat := CategorizedURLs{}
 
-	// Use gf tool if available for better pattern matching
-	if c.c.IsInstalled("gf") && len(urls) > 0 {
+	// Check if gf is the REAL gf tool (not aliased to git fetch)
+	// Test by running "gf -h" which should show gf help, not git fetch help
+	gfWorks := false
+	if c.c.IsInstalled("gf") {
+		r := exec.Run("gf", []string{"-h"}, &exec.Options{Timeout: 5 * time.Second})
+		// Real gf shows "Usage: gf" or pattern-related help
+		// git fetch shows "usage: git fetch"
+		gfWorks = r.Error == nil && !strings.Contains(r.Stdout, "git fetch") && !strings.Contains(r.Stderr, "git fetch")
+		if !gfWorks {
+			fmt.Println("        [Historic] gf tool not available (may be aliased), using built-in patterns")
+		}
+	}
+
+	// Use gf tool if available AND working for better pattern matching
+	useBuiltinPatterns := true
+	if gfWorks && len(urls) > 0 {
 		// Create single temp file for all gf patterns (efficiency optimization)
 		tmp, cleanup, err := exec.TempFile(strings.Join(urls, "\n"), "-urls.txt")
 		if err == nil {
@@ -448,9 +462,23 @@ func (c *Collector) CategorizeURLs(urls []string) CategorizedURLs {
 			}
 
 			wg.Wait()
+
+			// Check if gf returned any results - if ALL are empty, fall back to built-in
+			totalFound := len(cat.XSS) + len(cat.SQLi) + len(cat.SSRF) + len(cat.LFI) +
+				len(cat.RCE) + len(cat.SSTI) + len(cat.Redirect) + len(cat.Debug)
+			if totalFound > 0 {
+				useBuiltinPatterns = false
+				fmt.Printf("        [Historic] gf categorized: XSS=%d SQLi=%d SSRF=%d LFI=%d RCE=%d SSTI=%d Redirect=%d Debug=%d\n",
+					len(cat.XSS), len(cat.SQLi), len(cat.SSRF), len(cat.LFI),
+					len(cat.RCE), len(cat.SSTI), len(cat.Redirect), len(cat.Debug))
+			} else {
+				fmt.Println("        [Historic] gf returned no results, falling back to built-in patterns")
+			}
 		}
-	} else {
-		// Fallback to built-in pattern matching (already fast, no parallelization needed)
+	}
+
+	// Use built-in pattern matching if gf isn't available or returned nothing
+	if useBuiltinPatterns && len(urls) > 0 {
 		cat.XSS = filterByPatterns(urls, xssPatterns)
 		cat.SQLi = filterByPatterns(urls, sqliPatterns)
 		cat.SSRF = filterByPatterns(urls, ssrfPatterns)
@@ -459,6 +487,9 @@ func (c *Collector) CategorizeURLs(urls []string) CategorizedURLs {
 		cat.SSTI = filterByPatterns(urls, sstiPatterns)
 		cat.Redirect = filterByPatterns(urls, redirectPatterns)
 		cat.Debug = filterByPatterns(urls, debugPatterns)
+		fmt.Printf("        [Historic] built-in patterns: XSS=%d SQLi=%d SSRF=%d LFI=%d RCE=%d SSTI=%d Redirect=%d Debug=%d\n",
+			len(cat.XSS), len(cat.SQLi), len(cat.SSRF), len(cat.LFI),
+			len(cat.RCE), len(cat.SSTI), len(cat.Redirect), len(cat.Debug))
 	}
 
 	// These don't need gf - simple file extension/path matching

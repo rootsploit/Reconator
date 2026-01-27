@@ -24,6 +24,7 @@ Complete usage documentation for Reconator.
   - [check](#reconator-check)
   - [monitor](#reconator-monitor)
 - [Examples](#examples)
+- [Changelog](#changelog)
 
 ---
 
@@ -105,7 +106,7 @@ flowchart LR
 | **6** | Historic URLs | waybackurls, gau, waymore, urlfinder, uro, gf | URLs, JS files, params |
 | **7** | Tech Detection | httpx | Technologies, versions |
 | **8** | Directory Bruteforce | feroxbuster, gobuster, ffuf | Hidden paths, admin panels |
-| **9** | Vulnerability Scan | nuclei | Vulnerabilities by severity |
+| **9** | Vulnerability Scan | nuclei, dalfox, sxss, searchsploit | Vulnerabilities, XSS, CVEs |
 | **10** | Screenshot Capture | gowitness | Screenshots, clusters |
 | **11** | AI-Guided Scanning | OpenAI/Claude/Gemini + nuclei | CVE analysis, attack chains |
 
@@ -613,6 +614,81 @@ reconator scan AS13335 -p all
 ```bash
 reconator scan target.com -c 200 --dns-threads 300 -r 200 --skip-validation
 ```
+
+---
+
+## Changelog
+
+### v0.1.2 - Hybrid CVE Detection & Fast XSS Scanning
+
+**New Features:**
+- **sxss XSS Scanner**: Fast XSS reflection scanning with 150 concurrent threads
+  - Runs in parallel with dalfox for comprehensive XSS detection
+  - Command: `cat urls.txt | sxss -concurrency 150 -retries 3`
+- **Hybrid CVE Detection System**: Dynamic vulnerability lookup from multiple sources
+  - Priority chain: vulnx → NVD API → hardcoded database → searchsploit
+  - Local CVE cache with 24-hour TTL at `~/.reconator/cve-cache/`
+  - ExploitDB integration via searchsploit (optional)
+- **JS Analysis Improvements**: File paths in HTML report are now clickable hyperlinks
+
+**Fixes:**
+- DNS validation now uses trusted resolvers (~25 reliable servers) instead of full 18k list
+- Prevents false positives from unreliable public DNS servers during dnsx validation
+- puredns bruteforce still uses full 18k resolvers for better coverage
+
+**New Dependencies:**
+```bash
+# Required (installed automatically)
+go install github.com/unstabl3/sxss@latest
+
+# Optional (for ExploitDB CVE lookup)
+sudo apt install exploitdb
+searchsploit -u
+```
+
+---
+
+### v0.1.1 - DNS Validation & Historic URL Fixes
+
+**Fixes:**
+- Fixed DNS validation creating false positives with unreliable resolvers
+- Created trusted-resolvers.txt (~25 reliable public DNS servers) for dnsx validation
+- Fixed historic subdomain merging not including all sources
+- Improved subdomain deduplication logic
+
+**Improvements:**
+- Separated resolver files: 18k for puredns bruteforce, ~25 trusted for validation
+- Better error handling in historic URL collection
+- Improved wayback/gau/waymore result merging
+
+---
+
+### v0.1.0 - Initial Release
+
+**Core Features:**
+- 12-phase reconnaissance pipeline with parallel execution
+- Multi-input support: domains, IPs, CIDRs, ASNs
+- Subdomain enumeration with 30+ passive sources + DNS bruteforce
+- WAF/CDN detection and origin IP discovery
+- Port scanning with TLS fingerprinting
+- Subdomain takeover detection
+- Historic URL collection (wayback, gau, waymore)
+- Technology detection with version fingerprinting
+- Directory bruteforce with smart wordlist selection
+- Vulnerability scanning with nuclei + dalfox
+- Screenshot capture with clustering
+- AI-guided scanning with multi-provider support (Ollama, Groq, Claude, OpenAI, Gemini)
+
+**Configuration:**
+- Unified API key management (`~/.reconator/config.yaml`)
+- Auto-sync to subfinder and notify configs
+- Multi-provider AI with automatic failover and key rotation
+
+**Output:**
+- Structured JSON output for all phases
+- Interactive HTML dashboard report
+- Google dorks generation for OSINT
+- Export to CSV, JSON, Markdown formats
 
 ---
 

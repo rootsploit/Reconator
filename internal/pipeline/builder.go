@@ -53,7 +53,52 @@ func (b *Builder) Build(ctx context.Context, phase Phase) (*PhaseInput, error) {
 		fmt.Printf("        [Builder] Loaded %d/%d dependencies for %s\n", loadedDeps, len(deps), phase)
 	}
 
+	// CRITICAL FIX: Merge historic extracted subdomains into Subdomains for Ports/Takeover phases
+	// This ensures subdomains discovered in wayback/gau URLs are scanned for live hosts
+	if phase == PhasePorts || phase == PhaseTakeover {
+		if len(input.ExtractedSubdomains) > 0 {
+			beforeCount := len(input.Subdomains)
+			input.Subdomains = b.mergeSubdomains(input.Subdomains, input.ExtractedSubdomains)
+			input.AllSubdomains = b.mergeSubdomains(input.AllSubdomains, input.ExtractedSubdomains)
+			newCount := len(input.Subdomains) - beforeCount
+			if newCount > 0 {
+				fmt.Printf("        [Builder] Merged %d historic subdomains into scan list (total: %d)\n",
+					newCount, len(input.Subdomains))
+			}
+		}
+	}
+
 	return input, nil
+}
+
+// mergeSubdomains merges two subdomain lists, removing duplicates
+func (b *Builder) mergeSubdomains(existing, additional []string) []string {
+	if len(additional) == 0 {
+		return existing
+	}
+
+	seen := make(map[string]bool, len(existing)+len(additional))
+	result := make([]string, 0, len(existing)+len(additional))
+
+	// Add existing first (preserves order priority)
+	for _, s := range existing {
+		s = strings.TrimSpace(strings.ToLower(s))
+		if s != "" && !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+
+	// Add new subdomains from historic extraction
+	for _, s := range additional {
+		s = strings.TrimSpace(strings.ToLower(s))
+		if s != "" && !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+
+	return result
 }
 
 // isStorageNotFound checks if an error indicates the data doesn't exist

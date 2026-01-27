@@ -153,7 +153,8 @@ func (pm *ProviderManager) setupFallbackChain() {
 		// Find next available provider in config order
 		for j := i + 1; j < len(pm.config.Providers); j++ {
 			nextProvider := &pm.config.Providers[j]
-			if hasValidKeys(*nextProvider) || nextProvider.Name == ProviderOllama {
+			// hasValidKeys already checks Ollama reachability
+			if hasValidKeys(*nextProvider) {
 				provider.Fallback = nextProvider.Name
 				break
 			}
@@ -190,9 +191,13 @@ func (pm *ProviderManager) GetAvailableProviders() []ProviderType {
 
 // hasValidKeys checks if provider has non-placeholder keys
 func hasValidKeys(p ProviderConfig) bool {
-	// Ollama doesn't need keys, just an endpoint
+	// Ollama doesn't need keys, just an endpoint that's reachable
 	if p.Name == ProviderOllama {
-		return p.Endpoint != ""
+		if p.Endpoint == "" {
+			return false
+		}
+		// Quick reachability check with short timeout
+		return isOllamaReachable(p.Endpoint)
 	}
 
 	for _, key := range p.Keys {
@@ -208,6 +213,44 @@ func hasValidKeys(p ProviderConfig) bool {
 		return true
 	}
 	return false
+}
+
+// Ollama reachability cache to avoid repeated network checks
+var (
+	ollamaReachableCache     = make(map[string]bool)
+	ollamaReachableCacheMu   sync.RWMutex
+	ollamaReachableCacheTime = make(map[string]time.Time)
+)
+
+// isOllamaReachable checks if Ollama is running at the given endpoint
+// Uses a very short timeout to avoid blocking when Ollama isn't running
+// Results are cached for 30 seconds to avoid repeated checks
+func isOllamaReachable(endpoint string) bool {
+	ollamaReachableCacheMu.RLock()
+	if cachedTime, ok := ollamaReachableCacheTime[endpoint]; ok {
+		if time.Since(cachedTime) < 30*time.Second {
+			result := ollamaReachableCache[endpoint]
+			ollamaReachableCacheMu.RUnlock()
+			return result
+		}
+	}
+	ollamaReachableCacheMu.RUnlock()
+
+	// Do the actual check
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(endpoint + "/api/version")
+	reachable := err == nil && resp != nil && resp.StatusCode == 200
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	// Cache the result
+	ollamaReachableCacheMu.Lock()
+	ollamaReachableCache[endpoint] = reachable
+	ollamaReachableCacheTime[endpoint] = time.Now()
+	ollamaReachableCacheMu.Unlock()
+
+	return reachable
 }
 
 // HasAnyProviderConfigured checks if any AI provider is available

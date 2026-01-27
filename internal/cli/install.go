@@ -7,8 +7,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/rootsploit/reconator/internal/aiguided"
-	"github.com/rootsploit/reconator/internal/alerting"
+	"github.com/rootsploit/reconator/internal/apikeys"
 	"github.com/rootsploit/reconator/internal/tools"
 	"github.com/spf13/cobra"
 )
@@ -278,31 +277,37 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		yellow.Printf("      %s\n", installer.GetChromeInstallInstructions())
 	}
 
-	// Step 8: Create config templates
-	fmt.Println("\n[*] Creating configuration templates...")
+	// Step 8: Create unified config and import existing keys
+	fmt.Println("\n[*] Setting up unified configuration...")
 
-	// Subfinder provider config
-	if err := alerting.CreateSubfinderConfig(); err != nil {
-		yellow.Printf("    ✗ subfinder config: %v\n", err)
+	created, imported, err := apikeys.CreateAndImport()
+	if err != nil {
+		yellow.Printf("    ✗ config: %v\n", err)
 	} else {
-		green.Println("    ✓ subfinder provider config (~/.config/subfinder/provider-config.yaml)")
+		configPath := apikeys.GetDefaultConfigPath()
+		if created {
+			green.Printf("    ✓ Created unified config: %s\n", configPath)
+		} else {
+			green.Printf("    ✓ Config already exists: %s\n", configPath)
+		}
+		if imported > 0 {
+			green.Printf("    ✓ Imported %d existing keys from tool configs\n", imported)
+		}
 	}
 
-	// Notify config for alerts
-	if err := alerting.CreateDefaultConfig(); err != nil {
-		yellow.Printf("    ✗ notify config: %v\n", err)
-	} else {
-		green.Println("    ✓ notify config (~/.reconator/notify-config.yaml)")
+	// Sync keys to tool configs (subfinder, notify)
+	mgr := apikeys.NewManager()
+	if err := mgr.Load(); err == nil && (mgr.HasOSINTKeys() || mgr.HasNotifyConfig()) {
+		results := mgr.Sync()
+		for _, result := range results {
+			if result.Success && result.KeysAdded > 0 {
+				green.Printf("    ✓ Synced %d keys to %s\n", result.KeysAdded, result.Tool)
+			}
+		}
 	}
 
-	// AI config for AI-guided scanning
-	if err := aiguided.CreateDefaultConfigFile(); err != nil {
-		yellow.Printf("    ✗ AI config: %v\n", err)
-	} else {
-		green.Println("    ✓ AI config (~/.reconator/ai-config.yaml)")
-	}
-
-	gray.Println("    Edit these files to add your API keys")
+	gray.Println("\n    Edit ~/.reconator/config.yaml to add your API keys")
+	gray.Println("    Then run: reconator config sync")
 
 	// Summary
 	elapsed := time.Since(startTime).Round(time.Second)

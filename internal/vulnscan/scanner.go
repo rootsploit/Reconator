@@ -594,6 +594,21 @@ func (s *Scanner) ScanWithTech(hosts []string, categorizedURLs *historic.Categor
 		}()
 	}
 
+	// Run sxss for fast XSS reflection scanning on ALL URLs with parameters (parallel with dalfox)
+	// sxss is faster than dalfox and good for initial triage of reflectable parameters
+	if s.c.IsInstalled("sxss") && categorizedURLs != nil && len(categorizedURLs.XSS) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Printf("        Running sxss XSS reflection scan on %d URLs...\n", len(categorizedURLs.XSS))
+			vulns := s.sxssScan(categorizedURLs.XSS)
+			mu.Lock()
+			result.Vulnerabilities = append(result.Vulnerabilities, vulns...)
+			mu.Unlock()
+			fmt.Printf("        sxss: %d XSS reflections found\n", len(vulns))
+		}()
+	}
+
 	// Run targeted nuclei scan on categorized URLs (only in deep mode or with custom tags)
 	if s.c.IsInstalled("nuclei") && categorizedURLs != nil && (s.cfg.DeepScan || s.cfg.NucleiTags != "") {
 		var allCategorizedURLs []string
@@ -702,6 +717,16 @@ func (s *Scanner) ScanWithTech(hosts []string, categorizedURLs *historic.Categor
 	}
 
 	wg.Wait()
+
+	// Run version-based vulnerability detection if tech data is available
+	if techInput != nil && len(techInput.TechByHost) > 0 {
+		fmt.Println("        Running version-based vulnerability detection...")
+		versionResult := DetectVersionVulnerabilities(techInput.TechByHost)
+		if versionResult != nil && len(versionResult.Vulnerabilities) > 0 {
+			result.Vulnerabilities = append(result.Vulnerabilities, versionResult.Vulnerabilities...)
+			fmt.Printf("        version-detector: %d vulnerabilities/warnings found\n", len(versionResult.Vulnerabilities))
+		}
+	}
 
 	// Dedupe vulnerabilities
 	seen := make(map[string]bool)
@@ -1083,6 +1108,65 @@ func (s *Scanner) dalfoxScan(urls []string) []Vulnerability {
 				Tool:        "dalfox",
 			})
 		}
+	}
+
+	return vulns
+}
+
+// sxssScan runs sxss for fast XSS reflection scanning
+// sxss is a concurrent Go tool similar to kxss that checks for XSS reflection
+func (s *Scanner) sxssScan(urls []string) []Vulnerability {
+	var vulns []Vulnerability
+
+	if len(urls) == 0 {
+		return vulns
+	}
+
+	// Create temp file with URLs
+	tmp, cleanup, err := exec.TempFile(strings.Join(urls, "\n"), "-sxss-urls.txt")
+	if err != nil {
+		return vulns
+	}
+	defer cleanup()
+
+	// Build sxss command - sxss is lightweight, use high concurrency
+	concurrency := 150
+	if s.cfg.Threads > 0 && s.cfg.Threads > 150 {
+		concurrency = s.cfg.Threads
+	}
+
+	// Run sxss: cat urls.txt | sxss -concurrency N -retries 3
+	cmd := fmt.Sprintf("cat %s | sxss -concurrency %d -retries 3", tmp, concurrency)
+
+	// sxss timeout: 5 min for fast, 10 min for deep
+	timeout := 5 * time.Minute
+	if s.cfg.DeepScan {
+		timeout = 10 * time.Minute
+	}
+
+	r := exec.Run("sh", []string{"-c", cmd}, &exec.Options{Timeout: timeout})
+	if r.Error != nil {
+		return vulns
+	}
+
+	// Parse sxss output - each line is a vulnerable URL with reflected parameter info
+	// Format: URL with reflected parameter details
+	for _, line := range exec.Lines(r.Stdout) {
+		if line == "" {
+			continue
+		}
+
+		// sxss outputs vulnerable URLs with reflection info
+		// Extract the URL and parameter from the output
+		vulns = append(vulns, Vulnerability{
+			URL:         line,
+			TemplateID:  "sxss-xss-reflection",
+			Name:        "XSS Reflection Detected",
+			Severity:    "medium",
+			Type:        "xss",
+			Description: fmt.Sprintf("Parameter reflection detected by sxss: %s", line),
+			Tool:        "sxss",
+		})
 	}
 
 	return vulns

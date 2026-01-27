@@ -5,6 +5,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/rootsploit/reconator/internal/aiguided"
+	"github.com/rootsploit/reconator/internal/apikeys"
 	"github.com/rootsploit/reconator/internal/config"
 	"github.com/rootsploit/reconator/internal/runner"
 	"github.com/rootsploit/reconator/internal/version"
@@ -60,11 +61,13 @@ func init() {
 	rootCmd.AddCommand(installCmd)
 	rootCmd.AddCommand(checkCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(configCmd)
 }
 
 func Execute() error {
-	// Ensure AI config file exists (creates template if missing)
+	// Ensure config files exist (creates templates if missing)
 	aiguided.EnsureConfigExists()
+	apikeys.EnsureConfigExists()
 	return rootCmd.Execute()
 }
 

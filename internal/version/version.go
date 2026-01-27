@@ -6,7 +6,7 @@ import (
 )
 
 // Version information
-var Version = "0.1.1"
+var Version = "0.1.2"
 
 // Info returns formatted version information
 func Info() string {
