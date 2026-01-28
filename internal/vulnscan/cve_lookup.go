@@ -44,6 +44,35 @@ func NewCVELookup(checker InstalledChecker) *CVELookup {
 	}
 }
 
+// skipCVELookup contains products that should NOT have CVE lookups
+// These are typically cloud services, CDNs, or generic terms that cause false positives
+var skipCVELookup = map[string]bool{
+	// Cloud storage services (not software you run)
+	"amazon s3":     true,
+	"amazon s 3":    true,
+	"aws s3":        true,
+	"s3":            true,
+	"google cloud":  true,
+	"azure storage": true,
+	"azure blob":    true,
+	// CDN providers (not software you run)
+	"cloudflare":   true,
+	"akamai":       true,
+	"fastly":       true,
+	"cloudfront":   true,
+	"jsdelivr":     true,
+	"cdnjs":        true,
+	"unpkg":        true,
+	// Generic terms that cause FPs
+	"cdn":          true,
+	"hosted":       true,
+	"api":          true,
+	"analytics":    true,
+	"tracking":     true,
+	"fonts":        true,
+	"google fonts": true,
+}
+
 // LookupCVEs looks up CVEs for a product/version using hybrid approach:
 // 1. Check local cache
 // 2. Query vulnx (if installed)
@@ -52,6 +81,11 @@ func NewCVELookup(checker InstalledChecker) *CVELookup {
 func (l *CVELookup) LookupCVEs(product, version string) []CVEInfo {
 	// Normalize product name
 	product = normalizeProductName(product)
+
+	// Skip products that shouldn't have CVE lookups (cloud services, CDNs, etc.)
+	if skipCVELookup[strings.ToLower(product)] {
+		return nil
+	}
 
 	// 1. Check cache first
 	if cached, ok := l.cache.Get(product, version); ok {
@@ -313,10 +347,21 @@ func (l *CVELookup) cveAffectsVersion(configs []struct {
 		} `json:"cpeMatch"`
 	} `json:"nodes"`
 }, vendor, product, version string) bool {
-	// If no configurations, assume it might be relevant based on keyword search
+	// If no configurations, be conservative - only accept if product is well-known
 	if len(configs) == 0 {
-		return true
+		// Only trust keyword-only matches for well-known products
+		wellKnown := map[string]bool{
+			"php": true, "iis": true, "jquery": true, "apache": true,
+			"nginx": true, "bootstrap": true, "angularjs": true,
+		}
+		return wellKnown[strings.ToLower(product)]
 	}
+
+	// CPE format: cpe:2.3:a:vendor:product:version:...
+	// We need to match the product field (4th component) exactly
+	productLower := strings.ToLower(product)
+	productNormalized := strings.ReplaceAll(productLower, " ", "_")
+	vendorLower := strings.ToLower(vendor)
 
 	for _, config := range configs {
 		for _, node := range config.Nodes {
@@ -324,10 +369,33 @@ func (l *CVELookup) cveAffectsVersion(configs []struct {
 				if !match.Vulnerable {
 					continue
 				}
-				// Check if CPE contains our product
-				cpeLower := strings.ToLower(match.Criteria)
-				if strings.Contains(cpeLower, strings.ToLower(product)) ||
-					strings.Contains(cpeLower, strings.ToLower(vendor)) {
+				// Parse CPE components
+				// cpe:2.3:a:vendor:product:version:update:edition:lang:sw_edition:target_sw:target_hw:other
+				cpeParts := strings.Split(strings.ToLower(match.Criteria), ":")
+				if len(cpeParts) < 5 {
+					continue
+				}
+
+				cpeVendor := cpeParts[3]
+				cpeProduct := cpeParts[4]
+
+				// Require exact product match (with common variations)
+				productMatches := cpeProduct == productNormalized ||
+					cpeProduct == productLower ||
+					cpeProduct == strings.ReplaceAll(productLower, "-", "_") ||
+					strings.Contains(cpeProduct, productNormalized)
+
+				// Vendor should also match (but be more lenient)
+				vendorMatches := cpeVendor == vendorLower ||
+					strings.Contains(cpeVendor, vendorLower) ||
+					strings.Contains(vendorLower, cpeVendor)
+
+				if productMatches && vendorMatches {
+					return true
+				}
+
+				// Also accept if vendor OR product match exactly (for single-name products like "jquery")
+				if cpeProduct == productNormalized || cpeProduct == productLower {
 					return true
 				}
 			}

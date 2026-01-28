@@ -849,6 +849,11 @@ func (r *PipelineRunner) generateReport(target string, results map[pipeline.Phas
 			reportData.Screenshot = data
 		}
 	}
+	if res, ok := results[pipeline.PhaseJSAnalysis]; ok && res.Status == pipeline.StatusCompleted {
+		if data, ok := res.Data.(*jsanalysis.Result); ok {
+			reportData.JSAnalysis = data
+		}
+	}
 
 	// If we don't have results from this run, try to load from existing files
 	if reportData.Subdomain == nil || reportData.Ports == nil {
@@ -938,6 +943,13 @@ func (r *PipelineRunner) loadExistingResultsForReport(outDir string, reportData 
 	if reportData.Screenshot == nil {
 		if data := loadJSON[screenshot.Result](filepath.Join(outDir, "9-screenshots", "screenshot_results.json")); data != nil {
 			reportData.Screenshot = data
+		}
+	}
+
+	// Load JS analysis results if missing
+	if reportData.JSAnalysis == nil {
+		if data := loadJSON[jsanalysis.Result](filepath.Join(outDir, "6c-jsanalysis", "js_analysis.json")); data != nil {
+			reportData.JSAnalysis = data
 		}
 	}
 }

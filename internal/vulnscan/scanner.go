@@ -65,6 +65,63 @@ type NucleiScanType struct {
 	CustomPaths []string // Custom paths to check (for endpoint discovery without nuclei templates)
 }
 
+// falsePositiveTemplates contains template IDs known to produce false positives
+// These templates either detect informational items (not vulns) or have high FP rates
+var falsePositiveTemplates = map[string]bool{
+	// HTTP/3 is informational, not a vulnerability
+	"http3-support": true,
+	"quic-support":  true,
+
+	// S3 bucket existence detection (not misconfiguration)
+	"s3-detect":          true,
+	"aws-bucket-listing": true,
+
+	// Generic file path detection (high FP)
+	"generic-windows-path":   true,
+	"generic-linux-path":     true,
+	"generic-path-traversal": true,
+
+	// Detection templates that match patterns without exploitation
+	"options-method":            true,
+	"trace-method":              true,
+	"tech-detect":               true,
+	"http-missing-security-headers": true, // Info level
+}
+
+// falsePositivePatterns contains name/description patterns to filter
+var falsePositivePatterns = []string{
+	"HTTP/3 Support",
+	"QUIC Support",
+	"HTTP/3 Detected",
+	"S3 Bucket Detected",
+	"AWS S3 Bucket",
+	"OPTIONS Method",
+	"TRACE Method",
+}
+
+// isLikelyFalsePositive checks if a vulnerability is a known false positive
+func isLikelyFalsePositive(templateID, name string, severity string) bool {
+	// Check against known FP template IDs
+	if falsePositiveTemplates[templateID] {
+		return true
+	}
+
+	// Info-level findings are often FP in bug bounty context
+	if severity == "info" {
+		return true
+	}
+
+	// Check name patterns
+	nameLower := strings.ToLower(name)
+	for _, pattern := range falsePositivePatterns {
+		if strings.Contains(nameLower, strings.ToLower(pattern)) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // nucleiParallelScanTypes defines all nuclei scan types to run in parallel
 // Each scan type runs as a separate nuclei process for maximum parallelism
 var nucleiParallelScanTypes = []NucleiScanType{
@@ -1013,6 +1070,11 @@ func (s *Scanner) parseNucleiOutput(output string) []Vulnerability {
 		vulnType := entry.Type
 		if vulnType == "" && len(entry.Info.Tags) > 0 {
 			vulnType = entry.Info.Tags[0]
+		}
+
+		// Filter out known false positives
+		if isLikelyFalsePositive(entry.TemplateID, entry.Info.Name, entry.Info.Severity) {
+			continue
 		}
 
 		vulns = append(vulns, Vulnerability{

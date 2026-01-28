@@ -6,12 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rootsploit/reconator/internal/exec"
 	"github.com/rootsploit/reconator/internal/secheaders"
 	"github.com/rootsploit/reconator/internal/techdetect"
 	"github.com/rootsploit/reconator/internal/tools"
+	"github.com/rootsploit/reconator/internal/vulnscan"
 	"github.com/spf13/cobra"
 )
 
@@ -89,13 +91,14 @@ func runWebscan(cmd *cobra.Command, args []string) error {
 	checker := tools.NewChecker()
 
 	var vulns []NucleiVuln
+	var versionVulns []vulnscan.Vulnerability
 
 	if webscanFast {
 		// Fast mode: skip tech detection and headers, run nuclei -as only
 		fmt.Println("[*] Fast Mode: Running nuclei automatic scan only")
 		vulns = runNucleiAutoScan(targetURL, checker)
 	} else {
-		// Full mode: tech detection, headers, then nuclei
+		// Full mode: tech detection, headers, CVE detection, XSS scanning, then nuclei
 
 		// Phase 1: Technology Detection
 		fmt.Println("[*] Phase 1: Technology Detection")
@@ -117,9 +120,73 @@ func runWebscan(cmd *cobra.Command, args []string) error {
 			printHeadersResults(headersResult)
 		}
 
-		// Phase 3: Vulnerability Scanning (using nuclei -as for automatic tech-based scanning)
-		fmt.Println("\n[*] Phase 3: Vulnerability Scanning")
-		vulns = runNucleiAutoScan(targetURL, checker)
+		// Phase 3: CVE Version Detection (based on detected tech)
+		fmt.Println("\n[*] Phase 3: CVE Version Detection")
+		if techResult != nil && (len(techResult.TechByHost) > 0 || len(techResult.VersionByHost) > 0) {
+			// Merge TechByHost and VersionByHost for CVE lookup
+			techForCVE := make(map[string][]string)
+			for host, techs := range techResult.TechByHost {
+				techForCVE[host] = append(techForCVE[host], techs...)
+			}
+			for host, versions := range techResult.VersionByHost {
+				techForCVE[host] = append(techForCVE[host], versions...)
+			}
+
+			cveResult := vulnscan.DetectVersionVulnerabilitiesWithChecker(techForCVE, checker)
+			if cveResult != nil && len(cveResult.Vulnerabilities) > 0 {
+				versionVulns = cveResult.Vulnerabilities
+				fmt.Printf("    Found %d version-based CVEs\n", len(versionVulns))
+				// Show sources used
+				for source, count := range cveResult.Sources {
+					fmt.Printf("        %s: %d\n", source, count)
+				}
+			} else {
+				fmt.Println("    No version-based CVEs found")
+			}
+
+			// Show outdated software warnings
+			if cveResult != nil && len(cveResult.Warnings) > 0 {
+				fmt.Printf("    Outdated software warnings: %d\n", len(cveResult.Warnings))
+			}
+		} else {
+			fmt.Println("    Skipped: no technologies detected")
+		}
+
+		// Phase 4: XSS Scanning (dalfox + sxss)
+		fmt.Println("\n[*] Phase 4: XSS Scanning")
+		xssVulns := runXSSScan(targetURL, checker)
+		if len(xssVulns) > 0 {
+			// Convert XSS vulns to NucleiVuln format for unified display
+			for _, xv := range xssVulns {
+				vulns = append(vulns, NucleiVuln{
+					TemplateID:  xv.TemplateID,
+					Name:        xv.Name,
+					Severity:    xv.Severity,
+					Type:        xv.Type,
+					Host:        xv.Host,
+					MatchedAt:   xv.URL,
+					Description: xv.Description,
+				})
+			}
+		}
+
+		// Phase 5: Nuclei Vulnerability Scanning
+		fmt.Println("\n[*] Phase 5: Nuclei Vulnerability Scanning")
+		nucleiVulns := runNucleiAutoScan(targetURL, checker)
+		vulns = append(vulns, nucleiVulns...)
+	}
+
+	// Add version-based CVE findings to results
+	for _, vv := range versionVulns {
+		vulns = append(vulns, NucleiVuln{
+			TemplateID:  vv.TemplateID,
+			Name:        vv.Name,
+			Severity:    vv.Severity,
+			Type:        vv.Type,
+			Host:        vv.Host,
+			MatchedAt:   vv.URL,
+			Description: vv.Description,
+		})
 	}
 
 	// Print vulnerability results
@@ -368,4 +435,193 @@ func printVulnResultsDirect(vulns []NucleiVuln) {
 			fmt.Printf("        Description: %s\n", desc)
 		}
 	}
+}
+
+// XSSVuln represents an XSS vulnerability found by dalfox or sxss
+type XSSVuln struct {
+	URL         string
+	TemplateID  string
+	Name        string
+	Severity    string
+	Type        string
+	Host        string
+	Description string
+	Tool        string
+}
+
+// runXSSScan runs XSS scanning using dalfox and sxss in parallel
+func runXSSScan(targetURL string, checker *tools.Checker) []XSSVuln {
+	var allVulns []XSSVuln
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// Check if URL has parameters (needed for XSS scanning)
+	hasParams := strings.Contains(targetURL, "?") && strings.Contains(targetURL, "=")
+
+	if !hasParams {
+		fmt.Println("    URL has no parameters - generating test URLs with common params")
+		// Generate URLs with common XSS-prone parameters
+		targetURL = generateXSSTestURL(targetURL)
+	}
+
+	// Run dalfox (parallel)
+	if checker.IsInstalled("dalfox") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("    Running dalfox XSS scan...")
+			vulns := runDalfoxScan(targetURL)
+			mu.Lock()
+			allVulns = append(allVulns, vulns...)
+			mu.Unlock()
+			fmt.Printf("    dalfox: %d XSS vulnerabilities found\n", len(vulns))
+		}()
+	} else {
+		fmt.Println("    dalfox not installed - skipping")
+	}
+
+	// Run sxss (parallel)
+	if checker.IsInstalled("sxss") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("    Running sxss XSS reflection scan...")
+			vulns := runSxssScan(targetURL)
+			mu.Lock()
+			allVulns = append(allVulns, vulns...)
+			mu.Unlock()
+			fmt.Printf("    sxss: %d XSS reflections found\n", len(vulns))
+		}()
+	} else {
+		fmt.Println("    sxss not installed - skipping")
+	}
+
+	wg.Wait()
+
+	if !checker.IsInstalled("dalfox") && !checker.IsInstalled("sxss") {
+		fmt.Println("    No XSS tools installed. Install with: go install github.com/hahwul/dalfox/v2@latest")
+	}
+
+	return allVulns
+}
+
+// generateXSSTestURL adds common XSS-prone parameters to a URL
+func generateXSSTestURL(baseURL string) string {
+	// Common parameters that are often vulnerable to XSS
+	params := []string{"q", "search", "query", "s", "keyword", "id", "page", "name", "url", "redirect", "return", "callback"}
+
+	// Add first few params with test value
+	testParams := make([]string, 0, 3)
+	for i := 0; i < 3 && i < len(params); i++ {
+		testParams = append(testParams, params[i]+"=test")
+	}
+
+	separator := "?"
+	if strings.Contains(baseURL, "?") {
+		separator = "&"
+	}
+	return baseURL + separator + strings.Join(testParams, "&")
+}
+
+// runDalfoxScan runs dalfox for XSS scanning
+func runDalfoxScan(targetURL string) []XSSVuln {
+	var vulns []XSSVuln
+
+	outFile, err := os.CreateTemp("", "dalfox-*.json")
+	if err != nil {
+		return vulns
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+	defer os.Remove(outPath)
+
+	args := []string{
+		"url", targetURL,
+		"--silence",
+		"--format", "json",
+		"--output", outPath,
+		"--no-color",
+	}
+
+	// Dalfox timeout: 5 min for webscan
+	timeout := 5 * time.Minute
+	if cfg.DeepScan {
+		timeout = 10 * time.Minute
+	}
+
+	r := exec.Run("dalfox", args, &exec.Options{Timeout: timeout})
+	if r.Error != nil && cfg.Debug {
+		fmt.Printf("    [debug] dalfox error: %v\n", r.Error)
+	}
+
+	content, err := os.ReadFile(outPath)
+	if err != nil {
+		return vulns
+	}
+
+	for _, line := range strings.Split(string(content), "\n") {
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var entry struct {
+			URL        string `json:"url"`
+			Param      string `json:"param"`
+			MessageStr string `json:"message_str"`
+			Severity   string `json:"severity"`
+		}
+		if json.Unmarshal([]byte(line), &entry) == nil && entry.URL != "" {
+			severity := entry.Severity
+			if severity == "" {
+				severity = "high"
+			}
+			vulns = append(vulns, XSSVuln{
+				URL:         entry.URL,
+				TemplateID:  "dalfox-xss",
+				Name:        fmt.Sprintf("XSS via %s parameter", entry.Param),
+				Severity:    severity,
+				Type:        "xss",
+				Description: entry.MessageStr,
+				Tool:        "dalfox",
+			})
+		}
+	}
+
+	return vulns
+}
+
+// runSxssScan runs sxss for fast XSS reflection scanning
+func runSxssScan(targetURL string) []XSSVuln {
+	var vulns []XSSVuln
+
+	// Run sxss: echo URL | sxss -concurrency 50 -retries 3
+	cmd := fmt.Sprintf("echo '%s' | sxss -concurrency 50 -retries 3", targetURL)
+
+	timeout := 3 * time.Minute
+	if cfg.DeepScan {
+		timeout = 5 * time.Minute
+	}
+
+	r := exec.Run("sh", []string{"-c", cmd}, &exec.Options{Timeout: timeout})
+	if r.Error != nil && cfg.Debug {
+		fmt.Printf("    [debug] sxss error: %v\n", r.Error)
+	}
+
+	// Parse sxss output - each line is a vulnerable URL with reflected parameter info
+	for _, line := range exec.Lines(r.Stdout) {
+		if line == "" {
+			continue
+		}
+
+		vulns = append(vulns, XSSVuln{
+			URL:         line,
+			TemplateID:  "sxss-xss-reflection",
+			Name:        "XSS Reflection Detected",
+			Severity:    "medium",
+			Type:        "xss",
+			Description: fmt.Sprintf("Parameter reflection detected: %s", line),
+			Tool:        "sxss",
+		})
+	}
+
+	return vulns
 }

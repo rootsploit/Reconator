@@ -169,9 +169,9 @@ func GetExecutionOrder() [][]Phase {
 		// Level 3: WAF detection needs alive hosts from ports (provides CDN filtering for Level 4)
 		{PhaseWAF},
 		// Level 4: Depend on ports + WAF filtering (can run in parallel)
-		{PhaseTech, PhaseSecHeaders, PhaseDirBrute, PhaseScreenshot, PhaseVHost},
-		// Level 5: Depend on multiple phases (tech-aware vulnscan needs tech data)
-		{PhaseVulnScan},
+		{PhaseTech, PhaseSecHeaders, PhaseDirBrute, PhaseVHost},
+		// Level 5: Screenshot and VulnScan both depend on Tech (httpx_urls for screenshots, tech-aware scanning)
+		{PhaseScreenshot, PhaseVulnScan},
 		// Level 6: Final analysis
 		{PhaseAIGuided},
 	}
@@ -193,9 +193,9 @@ func GetExecutionOrderForASN() [][]Phase {
 		// Level 4: WAF detection needs alive hosts (provides CDN filtering)
 		{PhaseWAF},
 		// Level 5: Depend on ports + WAF filtering (can run in parallel)
-		{PhaseTech, PhaseSecHeaders, PhaseDirBrute, PhaseScreenshot, PhaseVHost},
-		// Level 6: Tech-aware vulnscan
-		{PhaseVulnScan},
+		{PhaseTech, PhaseSecHeaders, PhaseDirBrute, PhaseVHost},
+		// Level 6: Screenshot and VulnScan both depend on Tech (httpx_urls for screenshots, tech-aware scanning)
+		{PhaseScreenshot, PhaseVulnScan},
 		// Level 7: Final analysis
 		{PhaseAIGuided},
 	}

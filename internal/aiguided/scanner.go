@@ -302,7 +302,19 @@ func (s *Scanner) queryCVEMap(product string) []CVEInfo {
 }
 
 // normalizeTechName converts technology names to vulnx search terms
+// Strips version numbers (e.g., "jquery:1.9.1" -> "jquery") before lookup
 func normalizeTechName(tech string) string {
+	// Strip version from tech name (e.g., "jquery:1.9.1" -> "jquery")
+	// Versions can be separated by ":" or space followed by version pattern
+	product := tech
+	if idx := strings.Index(tech, ":"); idx != -1 {
+		// Check if what follows the colon looks like a version (starts with digit)
+		afterColon := strings.TrimSpace(tech[idx+1:])
+		if len(afterColon) > 0 && afterColon[0] >= '0' && afterColon[0] <= '9' {
+			product = strings.TrimSpace(tech[:idx])
+		}
+	}
+
 	techMap := map[string]string{
 		"nginx":         "nginx",
 		"apache":        "apache",
@@ -340,7 +352,7 @@ func normalizeTechName(tech string) string {
 		"varnish":       "varnish",
 	}
 
-	lower := strings.ToLower(tech)
+	lower := strings.ToLower(product)
 
 	if mapped, ok := techMap[lower]; ok {
 		return mapped
@@ -352,7 +364,7 @@ func normalizeTechName(tech string) string {
 		}
 	}
 
-	if len(tech) > 2 {
+	if len(product) > 2 {
 		return lower
 	}
 

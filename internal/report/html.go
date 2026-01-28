@@ -303,17 +303,13 @@ func aggregateSubdomainDetails(data *Data) []SubdomainDetail {
 		details = append(details, detail)
 	}
 
-	// Sort by: subdomain level (TLD first, then level 1, level 2, etc.), then by security priority within level
-	// This provides a clean hierarchical view: crusoe.ai → www.crusoe.ai → api.dev.crusoe.ai
+	// Sort by: alive status (alive first), then subdomain level, then security priority
+	// This ensures operational hosts are shown first for quick visibility
 	baseDomain := data.Subdomain.Domain
 	baseLabels := strings.Count(baseDomain, ".") + 1
 
 	sort.Slice(details, func(i, j int) bool {
-		// First: subdomain level (lower levels first - TLD, then level 1, then level 2, etc.)
-		levelI := strings.Count(details[i].Name, ".") + 1 - baseLabels
-		levelJ := strings.Count(details[j].Name, ".") + 1 - baseLabels
-
-		// Handle base domain (level 0) - always first
+		// First: base domain always comes first
 		if details[i].Name == baseDomain {
 			return true
 		}
@@ -321,21 +317,26 @@ func aggregateSubdomainDetails(data *Data) []SubdomainDetail {
 			return false
 		}
 
+		// Second: alive status (alive subdomains first)
+		if details[i].IsAlive != details[j].IsAlive {
+			return details[i].IsAlive
+		}
+
+		// Third: subdomain level (lower levels first - TLD, then level 1, then level 2, etc.)
+		levelI := strings.Count(details[i].Name, ".") + 1 - baseLabels
+		levelJ := strings.Count(details[j].Name, ".") + 1 - baseLabels
 		if levelI != levelJ {
 			return levelI < levelJ
 		}
 
-		// Within same level: security priority (takeover risks first, then vulns)
+		// Fourth: security priority (takeover risks first, then vulns)
 		if details[i].TakeoverRisk != details[j].TakeoverRisk {
 			return details[i].TakeoverRisk
 		}
 		if len(details[i].Vulns) != len(details[j].Vulns) {
 			return len(details[i].Vulns) > len(details[j].Vulns)
 		}
-		// Then by alive status
-		if details[i].IsAlive != details[j].IsAlive {
-			return details[i].IsAlive
-		}
+
 		// Finally alphabetically within same level
 		return details[i].Name < details[j].Name
 	})
@@ -642,6 +643,74 @@ func mergeSecHeadersAsVulnerabilities(data *Data) {
 	}
 }
 
+// updateAISummaryWithVulnCounts updates the AI Summary's OneLiner and KeyFindings
+// with accurate vulnerability counts from the full VulnScan results
+// This ensures the AI Summary reflects the true state of all vulnerabilities found
+func updateAISummaryWithVulnCounts(data *Data) {
+	// Skip if no AI summary or no vulnscan results
+	if data.AIGuided == nil || data.AIGuided.ExecutiveSummary == nil {
+		return
+	}
+	if data.VulnScan == nil || len(data.VulnScan.Vulnerabilities) == 0 {
+		return
+	}
+
+	// Count vulnerabilities by severity from VulnScan
+	critCount := data.VulnScan.BySeverity["critical"]
+	highCount := data.VulnScan.BySeverity["high"]
+	medCount := data.VulnScan.BySeverity["medium"]
+	lowCount := data.VulnScan.BySeverity["low"]
+
+	// Update OneLiner with accurate counts
+	target := data.Target
+	if critCount > 0 || highCount > 0 {
+		data.AIGuided.ExecutiveSummary.OneLiner = fmt.Sprintf("%s requires attention: %d critical, %d high, %d medium, %d low severity issues identified.",
+			target, critCount, highCount, medCount, lowCount)
+	} else if medCount > 0 || lowCount > 0 {
+		data.AIGuided.ExecutiveSummary.OneLiner = fmt.Sprintf("%s has %d medium and %d low severity issues to review.",
+			target, medCount, lowCount)
+	}
+
+	// Update KeyFindings with accurate counts
+	var findings []string
+	if critCount > 0 {
+		findings = append(findings, fmt.Sprintf("%d critical vulnerabilities require immediate attention", critCount))
+	}
+	if highCount > 0 {
+		findings = append(findings, fmt.Sprintf("%d high severity issues detected", highCount))
+	}
+	if medCount > 0 {
+		findings = append(findings, fmt.Sprintf("%d medium severity issues detected", medCount))
+	}
+	if lowCount > 0 {
+		findings = append(findings, fmt.Sprintf("%d low severity issues detected", lowCount))
+	}
+
+	// Add tech stack from original findings (preserve non-count items)
+	for _, f := range data.AIGuided.ExecutiveSummary.KeyFindings {
+		if strings.Contains(f, "Technology stack") || strings.Contains(f, "security headers") ||
+			strings.Contains(f, "hosts directly accessible") || strings.Contains(f, "indicators detected") {
+			findings = append(findings, f)
+		}
+	}
+
+	if len(findings) > 0 {
+		data.AIGuided.ExecutiveSummary.KeyFindings = findings
+	}
+
+	// Update risk assessment based on actual counts
+	// Risk levels: CRITICAL (any critical vulns), HIGH (>3 high vulns), MEDIUM (any high vulns), LOW (only medium/low)
+	if critCount > 0 {
+		data.AIGuided.ExecutiveSummary.RiskAssessment = fmt.Sprintf("CRITICAL - %d critical and %d high severity vulnerabilities require immediate attention", critCount, highCount)
+	} else if highCount > 3 {
+		data.AIGuided.ExecutiveSummary.RiskAssessment = fmt.Sprintf("HIGH - %d high severity vulnerabilities detected, prioritize remediation", highCount)
+	} else if highCount > 0 {
+		data.AIGuided.ExecutiveSummary.RiskAssessment = fmt.Sprintf("MEDIUM - %d high severity vulnerabilities detected", highCount)
+	} else if medCount > 0 {
+		data.AIGuided.ExecutiveSummary.RiskAssessment = fmt.Sprintf("LOW - %d medium severity issues detected, review recommended", medCount)
+	}
+}
+
 // Generate generates the HTML report
 func Generate(data *Data, outputDir string) error {
 	// Aggregate per-subdomain details
@@ -658,6 +727,9 @@ func Generate(data *Data, outputDir string) error {
 
 	// Sort vulnerabilities by severity (critical -> high -> medium -> low -> info)
 	sortVulnerabilitiesBySeverity(data)
+
+	// Update AI Summary with accurate vulnerability counts from VulnScan
+	updateAISummaryWithVulnCounts(data)
 
 	const tpl = `
 <!DOCTYPE html>
