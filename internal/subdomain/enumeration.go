@@ -23,18 +23,173 @@ type Result struct {
 	Duration      time.Duration  `json:"duration"`
 }
 
+// StepReporter interface for reporting step progress (Osmedeus-style)
+// Implemented by runner.StepProgressReporter
+// Uses string-based status to avoid circular imports with runner package
+type StepReporter interface {
+	ReportStep(name string, status string, count int)
+	ReportStepSkipped(name string, reason string)
+	ReportStepFailed(name string, err error)
+}
+
+// Step status constants (matches runner.StepStatus values)
+const (
+	StepCompleted = "completed"
+	StepSkipped   = "skipped"
+	StepFailed    = "failed"
+)
+
+// VerboseStepReporter implements StepReporter for verbose output mode
+// Prints Osmedeus-style step progress with icons
+type VerboseStepReporter struct {
+	indent string
+}
+
+// NewVerboseStepReporter creates a reporter for verbose step output
+func NewVerboseStepReporter() *VerboseStepReporter {
+	return &VerboseStepReporter{indent: "      "} // 6 spaces for nested output
+}
+
+func (r *VerboseStepReporter) ReportStep(name string, status string, count int) {
+	icon := r.getIcon(status)
+	if count > 0 {
+		fmt.Printf("%s├─ %s %s (%d)\n", r.indent, icon, name, count)
+	} else {
+		fmt.Printf("%s├─ %s %s\n", r.indent, icon, name)
+	}
+}
+
+func (r *VerboseStepReporter) ReportStepSkipped(name string, reason string) {
+	if reason != "" {
+		fmt.Printf("%s├─ ⏹ %s (%s)\n", r.indent, name, reason)
+	} else {
+		fmt.Printf("%s├─ ⏹ %s\n", r.indent, name)
+	}
+}
+
+func (r *VerboseStepReporter) ReportStepFailed(name string, err error) {
+	if err != nil {
+		fmt.Printf("%s├─ ✗ %s (%s)\n", r.indent, name, err.Error())
+	} else {
+		fmt.Printf("%s├─ ✗ %s\n", r.indent, name)
+	}
+}
+
+func (r *VerboseStepReporter) getIcon(status string) string {
+	switch status {
+	case StepCompleted:
+		return "✓"
+	case StepSkipped:
+		return "⏹"
+	case StepFailed:
+		return "✗"
+	default:
+		return "○"
+	}
+}
+
 type Enumerator struct {
-	cfg *config.Config
-	c   *tools.Checker
+	cfg      *config.Config
+	c        *tools.Checker
+	reporter StepReporter // Optional step progress reporter for verbose mode
 }
 
 func NewEnumerator(cfg *config.Config, checker *tools.Checker) *Enumerator {
 	return &Enumerator{cfg: cfg, c: checker}
 }
 
+// SetReporter sets the step progress reporter for verbose output
+func (e *Enumerator) SetReporter(reporter StepReporter) {
+	e.reporter = reporter
+}
+
+// reportStep safely reports a step (no-op if reporter is nil)
+func (e *Enumerator) reportStep(name string, status string, count int) {
+	if e.reporter != nil {
+		e.reporter.ReportStep(name, status, count)
+	}
+}
+
+// reportStepSkipped safely reports a skipped step (no-op if reporter is nil)
+func (e *Enumerator) reportStepSkipped(name string, reason string) {
+	if e.reporter != nil {
+		e.reporter.ReportStepSkipped(name, reason)
+	}
+}
+
+// checkWildcard detects if a domain has wildcard DNS resolution
+// Returns true if wildcard is detected, along with wildcard IPs
+func (e *Enumerator) checkWildcard(domain string) (bool, []string) {
+	if !e.c.IsInstalled("dnsx") {
+		return false, nil
+	}
+
+	// Generate random subdomain to test
+	randomSub := fmt.Sprintf("reconator-wildcard-test-%d.%s", time.Now().Unix(), domain)
+
+	// Create temp file with random subdomain
+	tmp, cleanup, err := exec.TempFile(randomSub, ".txt")
+	if err != nil {
+		return false, nil
+	}
+	defer cleanup()
+
+	// Try to resolve the random subdomain
+	args := []string{
+		"-l", tmp,
+		"-silent",
+		"-resp",
+		"-a", // Get A records
+	}
+
+	// Use trusted resolvers for wildcard check
+	resolvers := e.cfg.ResolversFile
+	if resolvers == "" {
+		resolvers = tools.FindTrustedResolvers()
+	}
+	if resolvers != "" {
+		args = append(args, "-r", resolvers)
+	}
+
+	r := exec.Run("dnsx", args, &exec.Options{Timeout: 30 * time.Second})
+	if r.Error != nil {
+		return false, nil
+	}
+
+	// If random subdomain resolves, wildcard is present
+	lines := exec.Lines(r.Stdout)
+	if len(lines) == 0 {
+		return false, nil
+	}
+
+	// Extract wildcard IPs from response
+	var wildcardIPs []string
+	for _, line := range lines {
+		// dnsx with -resp outputs "domain [ip]"
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			// Extract IP (remove brackets)
+			ip := strings.Trim(parts[1], "[]")
+			wildcardIPs = append(wildcardIPs, ip)
+		}
+	}
+
+	return true, wildcardIPs
+}
+
 func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 	start := time.Now()
 	result := &Result{Domain: domain, Sources: make(map[string]int)}
+
+	// Check for wildcard DNS before enumeration
+	fmt.Println("    [*] Checking for wildcard DNS...")
+	hasWildcard, wildcardIPs := e.checkWildcard(domain)
+	if hasWildcard {
+		fmt.Printf("    [!] Wildcard DNS detected (IPs: %s)\n", strings.Join(wildcardIPs, ", "))
+		fmt.Println("        Wildcard filtering enabled - dnsx will filter false positives")
+	} else {
+		fmt.Println("    [✓] No wildcard DNS detected")
+	}
 
 	var subs sync.Map
 	var wg sync.WaitGroup
@@ -82,6 +237,7 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 				subs.Store(s, true)
 			}
 			fmt.Printf("        %s: %d\n", name, len(res))
+			e.reportStep(name, StepCompleted, len(res))
 		}(t.name, t.fn)
 	}
 
@@ -103,6 +259,7 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 			subs.Store(s, true)
 		}
 		fmt.Printf("        3rd_party_apis: %d (from %d sources)\n", len(apiSubs), len(apiSources))
+		e.reportStep("3rd_party_apis", StepCompleted, len(apiSubs))
 	}()
 
 	// DNS Bruteforce with puredns - RUNS IN PARALLEL with passive enum
@@ -122,7 +279,12 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 				subs.Store(s, true)
 			}
 			fmt.Printf("        dns_bruteforce: %d\n", len(res))
+			e.reportStep("dns_bruteforce", StepCompleted, len(res))
 		}()
+	} else if e.cfg.SkipDNSBrute {
+		e.reportStepSkipped("dns_bruteforce", "--no-dns-brute")
+	} else if !e.c.IsInstalled("puredns") {
+		e.reportStepSkipped("dns_bruteforce", "puredns not installed")
 	}
 
 	// NOTE: wayback/gau subdomain extraction moved to historic phase
@@ -168,7 +330,10 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 				}
 				permMu.Unlock()
 				fmt.Printf("        alterx: %d\n", alterxCount)
+				e.reportStep("alterx", StepCompleted, alterxCount)
 			}()
+		} else {
+			e.reportStepSkipped("alterx", "not installed")
 		}
 
 		// mksub - PARALLEL
@@ -184,7 +349,10 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 				}
 				permMu.Unlock()
 				fmt.Printf("        mksub: %d\n", mksubCount)
+				e.reportStep("mksub", StepCompleted, mksubCount)
 			}()
+		} else {
+			e.reportStepSkipped("mksub", "not installed")
 		}
 
 		// AI-powered permutations (uses LLM to analyze patterns) - PARALLEL
@@ -203,8 +371,13 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 					}
 					permMu.Unlock()
 					fmt.Printf("        ai_permutation: %d\n", aiPermCount)
+					e.reportStep("ai_permutation", StepCompleted, aiPermCount)
+				} else if err != nil {
+					e.reportStepSkipped("ai_permutation", "API error")
 				}
 			}()
+		} else if !hasAIKeys {
+			e.reportStepSkipped("ai_permutation", "no AI keys")
 		}
 
 		// Wait for all permutation generators to complete
@@ -233,6 +406,7 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		}
 	} else if len(current) >= maxSubs {
 		fmt.Println("    [*] Permutations... SKIPPED (too many subdomains)")
+		e.reportStepSkipped("permutations", fmt.Sprintf("%d+ subs", maxSubs))
 	}
 
 	// Collect all subdomains (before validation - for takeover detection)
@@ -280,6 +454,9 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 		fmt.Println("    [*] DNS validation...")
 		validated = e.validate(all)
 		fmt.Printf("        validated: %d alive\n", len(validated))
+		e.reportStep("dns_validation", StepCompleted, len(validated))
+	} else if e.cfg.SkipValidation {
+		e.reportStepSkipped("dns_validation", "--skip-validation")
 	}
 
 	// Phase 5: SSL Certificate Recon (tlsx/CloudRecon + kaeferjaeger.gay IP ranges)
@@ -316,7 +493,12 @@ func (e *Enumerator) Enumerate(domain string) (*Result, error) {
 
 			// Also add to AllSubdomains for takeover checking
 			result.AllSubdomains = append(result.AllSubdomains, sslResult.Subdomains...)
+			e.reportStep("ssl_cert_recon", StepCompleted, len(sslResult.Subdomains))
+		} else if err != nil {
+			e.reportStepSkipped("ssl_cert_recon", "scan failed")
 		}
+	} else if e.cfg.PassiveMode {
+		e.reportStepSkipped("ssl_cert_recon", "passive mode")
 	}
 
 	// Dedupe and sort validated subdomains by level (lower levels first for priority scanning)
@@ -584,11 +766,14 @@ func (e *Enumerator) validate(subs []string) []string {
 		// Optimized dnsx flags for fast mass resolution:
 		// - Use TRUSTED resolvers (reliable public DNS) for validation
 		// - High thread count for parallel resolution
-		// - Skip -cname and -wd for pure validation speed (takeover phase does its own CNAME check)
+		// BB-4: Add -cname for subdomain takeover detection (critical for security)
+		// BB-4: Add -wd "*" for wildcard detection to filter false positives
 		args := []string{
 			"-l", tmp,
 			"-silent",
-			"-resp", // Still need response to confirm resolution
+			"-resp",  // Response to confirm resolution
+			"-cname", // BB-4: Extract CNAME records (critical for takeover detection)
+			"-wd", "*", // BB-4: Wildcard detection to filter false positives
 		}
 
 		// CRITICAL FIX: Use TRUSTED resolvers for validation (not the full 17k+ list)
@@ -643,6 +828,11 @@ func (e *Enumerator) validate(subs []string) []string {
 		defer outCleanup()
 
 		args := []string{"resolve", tmp, "-q", "-w", outTmp}
+
+		// BB-5: Add wildcard skip to prevent false positives from wildcard DNS
+		// puredns v2.x uses --skip-wildcard-filter (not --skip-wildcard)
+		args = append(args, "--skip-wildcard-filter")
+
 		// Use resolvers from config or find installed resolvers
 		resolvers := e.cfg.ResolversFile
 		if resolvers == "" {

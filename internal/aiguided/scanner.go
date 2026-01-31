@@ -14,6 +14,7 @@ import (
 	"github.com/rootsploit/reconator/internal/config"
 	"github.com/rootsploit/reconator/internal/exec"
 	"github.com/rootsploit/reconator/internal/tools"
+	"github.com/rootsploit/reconator/internal/vulnscan"
 )
 
 type Result struct {
@@ -303,7 +304,14 @@ func (s *Scanner) queryCVEMap(product string) []CVEInfo {
 
 // normalizeTechName converts technology names to vulnx search terms
 // Strips version numbers (e.g., "jquery:1.9.1" -> "jquery") before lookup
+// Returns empty string for cloud services/CDNs that should be skipped
 func normalizeTechName(tech string) string {
+	// Skip cloud services and CDNs that produce false positive CVE matches
+	// Uses shared skip list from vulnscan package
+	if vulnscan.ShouldSkipCVELookup(tech) {
+		return ""
+	}
+
 	// Strip version from tech name (e.g., "jquery:1.9.1" -> "jquery")
 	// Versions can be separated by ":" or space followed by version pattern
 	product := tech

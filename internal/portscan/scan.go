@@ -213,7 +213,7 @@ func (s *Scanner) httpx(input string) httpxResult {
 	}
 
 	// Core httpx flags - keep it simple for reliability
-	// Heavy flags like -jarm, -tls-grab, -favicon can cause timeouts on CDN-protected hosts
+	// BB-1: Enhanced httpx flags for better asset correlation
 	args := []string{
 		"-l", input,
 		"-silent", "-follow-redirects",
@@ -224,6 +224,18 @@ func (s *Scanner) httpx(input string) httpxResult {
 		"-timeout", "10", // 10 second timeout per host
 		"-retries", "2",  // Retry failed requests
 	}
+
+	// BB-1: Add enhanced fingerprinting flags if not in fast mode
+	// These help with asset correlation and infrastructure mapping
+	// Only add if DeepScan is enabled to avoid timeouts on CDN hosts
+	if s.cfg.DeepScan {
+		args = append(args,
+			"-jarm",    // JARM TLS fingerprinting for server identification
+			"-favicon", // Favicon hash for asset correlation across domains
+			"-tls-grab", // Additional TLS certificate details
+		)
+	}
+
 	// Use fewer threads for httpx to avoid rate limiting
 	threads := s.cfg.Threads
 	if threads > 25 {

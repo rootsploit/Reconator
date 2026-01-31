@@ -98,7 +98,7 @@ func (pm *ProviderManager) LoadFromEnv() {
 
 	// Groq
 	if keys := getEnvKeys("GROQ_API_KEY", "GROQ_API_KEYS"); len(keys) > 0 {
-		pm.addProvider(ProviderGroq, keys, "", "llama-3.1-70b-versatile", 30)
+		pm.addProvider(ProviderGroq, keys, "", "llama-3.3-70b-versatile", 30)
 	}
 
 	// DeepSeek
@@ -738,7 +738,7 @@ func queryGeminiWithKey(prompt, apiKey, model string) (*AIRecommendation, error)
 
 func queryGroqWithKey(prompt, apiKey, model string) (*AIRecommendation, error) {
 	if model == "" {
-		model = "llama-3.1-70b-versatile"
+		model = "llama-3.3-70b-versatile"
 	}
 
 	reqBody := map[string]interface{}{
@@ -1020,7 +1020,7 @@ func queryGeminiRaw(prompt, apiKey, model string) (string, error) {
 
 func queryGroqRaw(prompt, apiKey, model string) (string, error) {
 	if model == "" {
-		model = "llama-3.1-70b-versatile"
+		model = "llama-3.3-70b-versatile"
 	}
 
 	reqBody := map[string]interface{}{
@@ -1253,7 +1253,7 @@ providers:
   - name: groq
     keys:
       - "gsk-your-groq-key-here"
-    model: llama-3.1-70b-versatile
+    model: llama-3.3-70b-versatile
     rpm_limit: 30
 
 # Alternative: Set via environment variables

@@ -80,8 +80,9 @@ func init() {
 	scanCmd.Flags().StringVar(&cfg.NucleiTags, "nuclei-tags", "", "Custom nuclei tags (comma-separated, e.g., 'cve,rce,sqli')")
 	scanCmd.Flags().IntVar(&cfg.NucleiTimeout, "nuclei-timeout", 0, "Nuclei timeout in minutes (default: 10 fast, 30 deep)")
 
-	// Debug
+	// Debug and progress options
 	scanCmd.Flags().BoolVar(&cfg.Debug, "debug", false, "Show detailed timing logs for each tool execution")
+	scanCmd.Flags().BoolVar(&cfg.VerboseProgress, "verbose", false, "Show step-level progress within phases (Osmedeus-style icons)")
 
 	// Opt-out flags (features enabled by default, use these to disable)
 	scanCmd.Flags().BoolVar(&noScreenshots, "no-screenshots", false, "Disable screenshot capture")
@@ -154,6 +155,25 @@ func runScan(cmd *cobra.Command, args []string) error {
 	if cfg.QuickMode {
 		cfg.SkipDirBrute = true
 		cfg.SkipVulnScan = true
+	}
+
+	// Passive mode skips generative subdomain methods (DNS brute, permutations)
+	// but keeps API-based discovery and DNS validation for faster scans
+	if cfg.PassiveMode {
+		cfg.SkipDNSBrute = true
+
+		// Warn if user selected active phases with passive mode
+		hasActivePhases := false
+		for _, phase := range cfg.Phases {
+			if phase == "screenshot" || phase == "tech" || phase == "ports" || phase == "all" {
+				hasActivePhases = true
+				break
+			}
+		}
+		if hasActivePhases || cfg.EnableScreenshots {
+			fmt.Println("\n⚠️  Warning: Passive mode enabled with active scanning phases (screenshot/tech/ports)")
+			fmt.Println("   These phases will actively interact with target assets during the scan.\n")
+		}
 	}
 
 	// Load Ollama config from environment if not set via flags

@@ -30,12 +30,13 @@ var exportFormat string
 var exportCmd = &cobra.Command{
 	Use:   "export [target-directory]",
 	Short: "Export scan results to various formats",
-	Long: `Export scan results to CSV, JSON, or Markdown formats.
+	Long: `Export scan results to CSV, JSON, Markdown, or SARIF formats.
 
 Available formats:
   - csv:      Export subdomains, vulnerabilities, ports, and endpoints to CSV files
   - json:     Export complete structured scan data as JSON
   - markdown: Export a summary report in Markdown format
+  - sarif:    Export vulnerabilities in SARIF format (GitHub Security tab)
   - all:      Export to all formats
 
 Examples:
@@ -43,13 +44,14 @@ Examples:
   reconator export ./results/example.com --format csv
   reconator export ./results/example.com --format json
   reconator export ./results/example.com --format markdown
+  reconator export ./results/example.com --format sarif
   reconator export ./results/example.com --format all`,
 	Args: cobra.ExactArgs(1),
 	RunE: runExport,
 }
 
 func init() {
-	exportCmd.Flags().StringVarP(&exportFormat, "format", "f", "all", "Export format: csv, json, markdown, all")
+	exportCmd.Flags().StringVarP(&exportFormat, "format", "f", "all", "Export format: csv, json, markdown, sarif, all")
 	rootCmd.AddCommand(exportCmd)
 }
 
@@ -196,9 +198,17 @@ func runExport(cmd *cobra.Command, args []string) error {
 		}
 		green.Printf("    Markdown exported to: %s\n", path)
 
+	case "sarif":
+		path, err := exporter.ExportSARIF()
+		if err != nil {
+			return fmt.Errorf("SARIF export failed: %w", err)
+		}
+		green.Printf("    SARIF exported to: %s\n", path)
+		fmt.Println("    Upload to GitHub: gh code-scanning upload-sarif --sarif-file=" + path)
+
 	default:
 		yellow.Printf("    Unknown format: %s\n", exportFormat)
-		fmt.Println("    Available formats: csv, json, markdown, all")
+		fmt.Println("    Available formats: csv, json, markdown, sarif, all")
 		return nil
 	}
 

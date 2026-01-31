@@ -28,28 +28,28 @@ import (
 // Data holds all scan results for the report
 type Data struct {
 	// Metadata
-	Target   string
-	Version  string
-	Date     string
-	Duration string
-	Command  string
+	Target   string `json:"Target"`
+	Version  string `json:"Version"`
+	Date     string `json:"Date"`
+	Duration string `json:"Duration"`
+	Command  string `json:"Command"`
 
 	// Phase Results
-	Subdomain  *subdomain.Result
-	WAF        *waf.Result
-	Ports      *portscan.Result
-	VHost      *vhost.Result
-	Takeover   *takeover.Result
-	Historic   *historic.Result
-	Tech       *techdetect.Result
-	DirBrute   *dirbrute.Result
-	VulnScan   *vulnscan.Result
-	AIGuided   *aiguided.Result
-	IPRange    *iprange.Result
-	Screenshot *screenshot.Result
-	JSAnalysis *jsanalysis.Result
-	SecHeaders *secheaders.Result
-	OSINT      interface{}
+	Subdomain  *subdomain.Result  `json:"Subdomain,omitempty"`
+	WAF        *waf.Result        `json:"WAF,omitempty"`
+	Ports      *portscan.Result   `json:"Ports,omitempty"`
+	VHost      *vhost.Result      `json:"VHost,omitempty"`
+	Takeover   *takeover.Result   `json:"Takeover,omitempty"`
+	Historic   *historic.Result   `json:"Historic,omitempty"`
+	Tech       *techdetect.Result `json:"Tech,omitempty"`
+	DirBrute   *dirbrute.Result   `json:"DirBrute,omitempty"`
+	VulnScan   *vulnscan.Result   `json:"VulnScan,omitempty"`
+	AIGuided   *aiguided.Result   `json:"AIGuided,omitempty"`
+	IPRange    *iprange.Result    `json:"IPRange,omitempty"`
+	Screenshot *screenshot.Result `json:"Screenshot,omitempty"`
+	JSAnalysis *jsanalysis.Result `json:"JSAnalysis,omitempty"`
+	SecHeaders *secheaders.Result `json:"SecHeaders,omitempty"`
+	OSINT      interface{}        `json:"OSINT,omitempty"`
 
 	// Computed per-subdomain details
 	SubdomainDetails []SubdomainDetail
@@ -62,6 +62,9 @@ type Data struct {
 
 	// Technology summary for visualization
 	TechSummary []TechCount
+
+	// Logo embedded as base64 for branding
+	LogoBase64 template.URL
 }
 
 // ScreenshotImage holds a screenshot with embedded base64 data
@@ -267,9 +270,26 @@ func aggregateSubdomainDetails(data *Data) []SubdomainDetail {
 		dirByHost = data.DirBrute.ByHost
 	}
 
+	// Build combined list of all hosts to include in report:
+	// 1. Subdomains from enumeration
+	// 2. Alive hosts (may include hosts discovered via httpx not in subdomain list)
+	// 3. Hosts with tech data (may include hosts from historic URLs)
+	allHosts := make(map[string]bool)
+	for _, sub := range data.Subdomain.Subdomains {
+		allHosts[sub] = true
+	}
+	// Add alive hosts that might not be in subdomain list
+	for host := range aliveSet {
+		allHosts[host] = true
+	}
+	// Add hosts with tech data
+	for host := range techByHost {
+		allHosts[host] = true
+	}
+
 	// Build per-subdomain details
 	var details []SubdomainDetail
-	for _, sub := range data.Subdomain.Subdomains {
+	for sub := range allHosts {
 		detail := SubdomainDetail{
 			Name:         sub,
 			IsAlive:      aliveSet[sub],
@@ -719,6 +739,22 @@ func Generate(data *Data, outputDir string) error {
 	// Load screenshots as base64 for embedding
 	loadScreenshotImages(data, outputDir)
 
+	// Load logo as base64 for branding
+	// Try multiple possible logo locations
+	logoPaths := []string{
+		filepath.Join(outputDir, "../assets/logo-transparent.png"),
+		filepath.Join(outputDir, "../../assets/logo-transparent.png"),
+		"./assets/logo-transparent.png",
+		"./web/public/logo.png",
+	}
+	for _, logoPath := range logoPaths {
+		if logoData, err := os.ReadFile(logoPath); err == nil {
+			b64Logo := base64.StdEncoding.EncodeToString(logoData)
+			data.LogoBase64 = template.URL(fmt.Sprintf("data:image/png;base64,%s", b64Logo))
+			break
+		}
+	}
+
 	// Build tech summary
 	data.TechSummary = buildTechSummary(data)
 
@@ -993,6 +1029,62 @@ func Generate(data *Data, outputDir string) error {
         .tag.low, .badge.low { background: rgba(59, 130, 246, 0.2); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.3); }
         .tag.info, .badge.info { background: rgba(139, 92, 246, 0.2); color: #c4b5fd; border: 1px solid rgba(139, 92, 246, 0.3); }
         .tag.success, .badge.success { background: rgba(34, 197, 94, 0.2); color: #86efac; border: 1px solid rgba(34, 197, 94, 0.3); }
+        .badge.tool { background: rgba(100, 116, 139, 0.2); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
+
+        /* CVSS Badge */
+        .cvss-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            margin-right: 6px;
+        }
+        .cvss-badge.critical { background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%); color: white; }
+        .cvss-badge.high { background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%); color: white; }
+        .cvss-badge.medium { background: linear-gradient(135deg, #ca8a04 0%, #a16207 100%); color: white; }
+        .cvss-badge.low { background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: white; }
+
+        .cvss-score {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .cvss-score.critical { background: var(--critical); color: white; }
+        .cvss-score.high { background: var(--warning); color: black; }
+        .cvss-score.medium { background: #ca8a04; color: white; }
+        .cvss-score.low { background: var(--info); color: white; }
+
+        .cvss-vector {
+            margin-left: 8px;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-family: monospace;
+        }
+
+        /* Export Buttons */
+        .export-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .export-btn:hover {
+            background: var(--accent);
+            color: white;
+            border-color: var(--accent);
+        }
+        .export-btn span { font-size: 1rem; }
         .tag.waf, .badge.waf { background: rgba(168, 85, 247, 0.2); color: #d8b4fe; border: 1px solid rgba(168, 85, 247, 0.3); }
         .tag.tech, .badge.tech { background: rgba(99, 102, 241, 0.15); color: #a5b4fc; border: 1px solid rgba(99, 102, 241, 0.2); }
         .tag.takeover, .badge.takeover { background: rgba(220, 38, 38, 0.3); color: #fca5a5; border: 1px solid rgba(220, 38, 38, 0.5); }
@@ -1336,7 +1428,7 @@ func Generate(data *Data, outputDir string) error {
         .asset-row.has-vuln { /* removed left border */ }
         .asset-row.has-takeover { background: linear-gradient(90deg, rgba(220, 38, 38, 0.08) 0%, var(--bg-card) 30%); }
         .asset-row.alive { /* no special styling */ }
-        .asset-row.dead { opacity: 0.5; }
+        .asset-row.dead { /* no graying out - all assets equally visible */ }
 
         .asset-content {
             flex: 1;
@@ -2250,6 +2342,9 @@ func Generate(data *Data, outputDir string) error {
         <aside class="sidebar">
             <div class="sidebar-header">
                 <div class="logo">
+                    {{if .LogoBase64}}
+                    <img src="{{.LogoBase64}}" alt="Reconator" style="height: 36px; width: auto; object-fit: contain;">
+                    {{end}}
                     <span>Reconator</span>
                 </div>
                 <div class="target-badge">{{.Target}}</div>
@@ -2730,6 +2825,14 @@ func Generate(data *Data, outputDir string) error {
                         </select>
                     </div>
                     <span class="count-display" id="assetCount">{{len .SubdomainDetails}} results</span>
+                    <div class="export-group" style="display: flex; gap: 8px; margin-left: auto;">
+                        <button class="export-btn" onclick="exportAssetsCSV()" title="Export as CSV">
+                            <span>📄</span> CSV
+                        </button>
+                        <button class="export-btn" onclick="exportAssetsJSON()" title="Export as JSON">
+                            <span>📋</span> JSON
+                        </button>
+                    </div>
                 </div>
 
                 <div class="asset-list" id="assetList">
@@ -2898,19 +3001,29 @@ func Generate(data *Data, outputDir string) error {
                         <button class="filter-btn" onclick="setVulnFilter('low', this)">Low</button>
                         <button class="filter-btn" onclick="setVulnFilter('info', this)">Info</button>
                     </div>
+                    <div class="export-group" style="display: flex; gap: 8px; margin-left: auto;">
+                        <button class="export-btn" onclick="exportVulnsCSV()" title="Export as CSV">
+                            <span>📄</span> CSV
+                        </button>
+                        <button class="export-btn" onclick="exportVulnsJSON()" title="Export as JSON">
+                            <span>📋</span> JSON
+                        </button>
+                    </div>
                 </div>
 
                 <div class="vuln-list" id="vulnList">
                     {{range .VulnScan.Vulnerabilities}}
-                    <div class="vuln-item {{.Severity}}" data-severity="{{.Severity}}" data-name="{{.Name}}" data-host="{{if .URL}}{{.URL}}{{else}}{{.Host}}{{end}}" onclick="toggleVuln(this)">
+                    <div class="vuln-item {{.Severity}}" data-severity="{{.Severity}}" data-name="{{.Name}}" data-host="{{if .URL}}{{.URL}}{{else}}{{.Host}}{{end}}" data-cvss="{{.CVSS}}" data-cwe="{{.CWE}}" data-type="{{.Type}}" data-tool="{{.Tool}}" onclick="toggleVuln(this)">
                         <div class="vuln-header">
                             <div class="vuln-title-row">
                                 <span class="vuln-expand-icon">▶</span>
                                 <span class="vuln-name">{{.Name}}</span>
                             </div>
                             <div class="vuln-badges">
+                                {{if gt .CVSS 0.0}}<span class="cvss-badge {{if ge .CVSS 9.0}}critical{{else if ge .CVSS 7.0}}high{{else if ge .CVSS 4.0}}medium{{else}}low{{end}}">CVSS {{printf "%.1f" .CVSS}}</span>{{end}}
                                 <span class="badge {{.Severity}}">{{.Severity}}</span>
-                                {{if .Tool}}<span class="badge info" style="font-size: 0.7rem;">{{.Tool}}</span>{{end}}
+                                {{if .CWE}}<span class="badge info" style="font-size: 0.7rem;">{{.CWE}}</span>{{end}}
+                                {{if .Tool}}<span class="badge tool" style="font-size: 0.7rem;">{{.Tool}}</span>{{end}}
                             </div>
                         </div>
                         <div class="vuln-summary">
@@ -2931,6 +3044,21 @@ func Generate(data *Data, outputDir string) error {
                                     <div class="vuln-detail-label">Type</div>
                                     <div class="vuln-detail-value">{{.Type}}</div>
                                 </div>
+                                {{if gt .CVSS 0.0}}
+                                <div class="vuln-detail-section">
+                                    <div class="vuln-detail-label">CVSS Score</div>
+                                    <div class="vuln-detail-value">
+                                        <span class="cvss-score {{if ge .CVSS 9.0}}critical{{else if ge .CVSS 7.0}}high{{else if ge .CVSS 4.0}}medium{{else}}low{{end}}">{{printf "%.1f" .CVSS}}</span>
+                                        {{if .CVSSVector}}<span class="cvss-vector">{{.CVSSVector}}</span>{{end}}
+                                    </div>
+                                </div>
+                                {{end}}
+                                {{if .CWE}}
+                                <div class="vuln-detail-section">
+                                    <div class="vuln-detail-label">CWE</div>
+                                    <div class="vuln-detail-value"><a href="https://cwe.mitre.org/data/definitions/{{trimPrefix .CWE "CWE-"}}.html" target="_blank" onclick="event.stopPropagation()">{{.CWE}}</a></div>
+                                </div>
+                                {{end}}
                                 {{if .TemplateID}}
                                 <div class="vuln-detail-section">
                                     <div class="vuln-detail-label">Template ID</div>
@@ -2941,6 +3069,12 @@ func Generate(data *Data, outputDir string) error {
                                 <div class="vuln-detail-section">
                                     <div class="vuln-detail-label">Matcher</div>
                                     <div class="vuln-detail-value">{{.Matcher}}</div>
+                                </div>
+                                {{end}}
+                                {{if .Reference}}
+                                <div class="vuln-detail-section">
+                                    <div class="vuln-detail-label">Reference</div>
+                                    <div class="vuln-detail-value"><a href="{{.Reference}}" target="_blank" onclick="event.stopPropagation()">{{.Reference}}</a></div>
                                 </div>
                                 {{end}}
                             </div>
@@ -3813,6 +3947,126 @@ func Generate(data *Data, outputDir string) error {
             el.classList.toggle('expanded');
         }
 
+        // Export Vulnerabilities as CSV
+        function exportVulnsCSV() {
+            const vulns = document.querySelectorAll('.vuln-item');
+            if (vulns.length === 0) {
+                alert('No vulnerabilities to export');
+                return;
+            }
+
+            // CSV header
+            let csv = 'Name,Severity,CVSS,CWE,Type,Host/URL,Tool,Description\n';
+
+            vulns.forEach(item => {
+                const name = (item.dataset.name || '').replace(/"/g, '""');
+                const severity = item.dataset.severity || '';
+                const cvss = item.dataset.cvss || '';
+                const cwe = item.dataset.cwe || '';
+                const type = item.dataset.type || '';
+                const host = (item.dataset.host || '').replace(/"/g, '""');
+                const tool = item.dataset.tool || '';
+                const descEl = item.querySelector('.vuln-detail-value:last-child');
+                const desc = descEl ? descEl.textContent.trim().replace(/"/g, '""').replace(/\n/g, ' ') : '';
+
+                csv += '"' + name + '","' + severity + '","' + cvss + '","' + cwe + '","' + type + '","' + host + '","' + tool + '","' + desc + '"\n';
+            });
+
+            downloadFile(csv, 'vulnerabilities.csv', 'text/csv');
+        }
+
+        // Export Vulnerabilities as JSON
+        function exportVulnsJSON() {
+            const vulns = document.querySelectorAll('.vuln-item');
+            if (vulns.length === 0) {
+                alert('No vulnerabilities to export');
+                return;
+            }
+
+            const data = [];
+            vulns.forEach(item => {
+                const vuln = {
+                    name: item.dataset.name || '',
+                    severity: item.dataset.severity || '',
+                    cvss: parseFloat(item.dataset.cvss) || 0,
+                    cwe: item.dataset.cwe || '',
+                    type: item.dataset.type || '',
+                    host: item.dataset.host || '',
+                    tool: item.dataset.tool || '',
+                };
+                const descEl = item.querySelector('.vuln-detail-value:last-child');
+                if (descEl) vuln.description = descEl.textContent.trim();
+                data.push(vuln);
+            });
+
+            downloadFile(JSON.stringify(data, null, 2), 'vulnerabilities.json', 'application/json');
+        }
+
+        // Helper function to download files
+        function downloadFile(content, filename, mimeType) {
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        // Export Assets as CSV
+        function exportAssetsCSV() {
+            const assets = document.querySelectorAll('.asset-row');
+            if (assets.length === 0) {
+                alert('No assets to export');
+                return;
+            }
+
+            // CSV header
+            let csv = 'Subdomain,Alive,IP,Ports,Technologies,Vulnerabilities,WAF,Takeover Risk\n';
+
+            assets.forEach(row => {
+                const name = (row.dataset.name || '').replace(/"/g, '""');
+                const alive = row.dataset.alive === 'true' ? 'Yes' : 'No';
+                const ip = (row.dataset.ip || '').replace(/"/g, '""');
+                const ports = (row.dataset.ports || '').replace(/"/g, '""');
+                const techs = (row.dataset.techs || '').replace(/"/g, '""');
+                const vulns = row.dataset.vulns || '0';
+                const waf = row.dataset.waf === 'true' ? 'Yes' : 'No';
+                const takeover = row.dataset.takeover === 'true' ? 'Yes' : 'No';
+
+                csv += '"' + name + '","' + alive + '","' + ip + '","' + ports + '","' + techs + '","' + vulns + '","' + waf + '","' + takeover + '"\n';
+            });
+
+            downloadFile(csv, 'subdomains.csv', 'text/csv');
+        }
+
+        // Export Assets as JSON
+        function exportAssetsJSON() {
+            const assets = document.querySelectorAll('.asset-row');
+            if (assets.length === 0) {
+                alert('No assets to export');
+                return;
+            }
+
+            const data = [];
+            assets.forEach(row => {
+                data.push({
+                    subdomain: row.dataset.name || '',
+                    alive: row.dataset.alive === 'true',
+                    ip: row.dataset.ip || '',
+                    ports: (row.dataset.ports || '').split(',').filter(p => p).map(p => parseInt(p)),
+                    technologies: (row.dataset.techs || '').split(',').filter(t => t),
+                    vulnerabilities: parseInt(row.dataset.vulns) || 0,
+                    waf: row.dataset.waf === 'true',
+                    takeover_risk: row.dataset.takeover === 'true',
+                });
+            });
+
+            downloadFile(JSON.stringify(data, null, 2), 'subdomains.json', 'application/json');
+        }
+
         // Screenshot Gallery
         function setGalleryView(view, btn) {
             document.querySelectorAll('#screenshots .filter-group .filter-btn').forEach(p => p.classList.remove('active'));
@@ -3933,6 +4187,9 @@ func Generate(data *Data, outputDir string) error {
 				return 0
 			}
 			return (value * 100) / max
+		},
+		"trimPrefix": func(s, prefix string) string {
+			return strings.TrimPrefix(s, prefix)
 		},
 	}
 

@@ -1,5 +1,10 @@
 package config
 
+import (
+	"os"
+	"path/filepath"
+)
+
 // Config holds all configuration options for reconator
 type Config struct {
 	// Target configuration
@@ -61,6 +66,9 @@ type Config struct {
 	// Debug
 	Debug bool // Show detailed timing logs for each tool execution
 
+	// Verbose progress - show step-level progress within phases (Osmedeus-style)
+	VerboseProgress bool // Show ✓/⏹/✗ icons for each tool within a phase
+
 	// Timeouts
 	ScanTimeout  int // Global scan timeout in minutes (default: 0 = no limit)
 	PhaseTimeout int // Per-phase timeout in minutes (default: 30)
@@ -82,8 +90,15 @@ type Config struct {
 
 // DefaultConfig returns a configuration with default values
 func DefaultConfig() *Config {
+	// Default results directory in user's home directory
+	homeDir, err := os.UserHomeDir()
+	outputDir := "./results" // Fallback to current directory
+	if err == nil {
+		outputDir = filepath.Join(homeDir, "reconator")
+	}
+
 	return &Config{
-		OutputDir:         "./results",
+		OutputDir:         outputDir,
 		Phases:            []string{"all"},
 		Profile:           "auto", // Auto-detect system resources
 		Threads:           0,      // 0 = auto-detect based on profile

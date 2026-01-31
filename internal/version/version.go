@@ -5,8 +5,12 @@ import (
 	"runtime"
 )
 
-// Version information
-var Version = "0.1.2"
+// Version information - set at build time with ldflags
+var (
+	Version   = "1.0.0"
+	Commit    = "dev"
+	BuildDate = "unknown"
+)
 
 // Info returns formatted version information
 func Info() string {

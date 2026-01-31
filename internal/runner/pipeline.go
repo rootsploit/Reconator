@@ -554,8 +554,14 @@ func (r *PipelineRunner) shouldSkipPhase(phase pipeline.Phase) bool {
 		if !iprange.IsASN(r.cfg.Target) && !iprange.IsIPTarget(r.cfg.Target) {
 			return true
 		}
-	case pipeline.PhasePorts, pipeline.PhaseTech:
+	case pipeline.PhasePorts:
+		// Skip ports in passive mode (no exceptions)
 		if r.cfg.PassiveMode {
+			return true
+		}
+	case pipeline.PhaseTech:
+		// Allow tech detection if explicitly selected, even in passive mode
+		if r.cfg.PassiveMode && !r.cfg.ShouldRunPhase("tech") {
 			return true
 		}
 	case pipeline.PhaseDirBrute:
@@ -573,9 +579,10 @@ func (r *PipelineRunner) shouldSkipPhase(phase pipeline.Phase) bool {
 			}
 			return true
 		}
-		if r.cfg.PassiveMode {
+		// Allow screenshots if explicitly selected, even in passive mode
+		if r.cfg.PassiveMode && !r.cfg.ShouldRunPhase("screenshot") {
 			if r.cfg.Debug {
-				fmt.Println("    [DEBUG] Skipping screenshot: PassiveMode=true")
+				fmt.Println("    [DEBUG] Skipping screenshot: PassiveMode=true and not explicitly selected")
 			}
 			return true
 		}

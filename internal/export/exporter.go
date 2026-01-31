@@ -20,6 +20,7 @@ const (
 	FormatCSV      Format = "csv"
 	FormatJSON     Format = "json"
 	FormatMarkdown Format = "markdown"
+	FormatSARIF    Format = "sarif"
 )
 
 // Exporter handles exporting scan results to various formats
@@ -42,6 +43,8 @@ func (e *Exporter) Export(format Format) (string, error) {
 		return e.ExportJSON()
 	case FormatMarkdown:
 		return e.ExportMarkdown()
+	case FormatSARIF:
+		return e.ExportSARIF()
 	default:
 		return "", fmt.Errorf("unsupported format: %s", format)
 	}
@@ -51,7 +54,7 @@ func (e *Exporter) Export(format Format) (string, error) {
 func (e *Exporter) ExportAll() ([]string, error) {
 	var files []string
 
-	for _, format := range []Format{FormatCSV, FormatJSON, FormatMarkdown} {
+	for _, format := range []Format{FormatCSV, FormatJSON, FormatMarkdown, FormatSARIF} {
 		path, err := e.Export(format)
 		if err != nil {
 			return files, err
@@ -531,6 +534,320 @@ func (e *Exporter) ExportMarkdown() (string, error) {
 	return path, nil
 }
 
+// ExportSARIF exports vulnerabilities in SARIF format for GitHub Security tab
+// SARIF (Static Analysis Results Interchange Format) is an OASIS standard
+// Spec: https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html
+func (e *Exporter) ExportSARIF() (string, error) {
+	exportDir := filepath.Join(e.outDir, "exports")
+	if err := os.MkdirAll(exportDir, 0755); err != nil {
+		return "", err
+	}
+
+	// Build SARIF structure
+	sarif := SARIFReport{
+		Schema:  "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+		Version: "2.1.0",
+		Runs:    []SARIFRun{},
+	}
+
+	// Create a single run for Reconator
+	run := SARIFRun{
+		Tool: SARIFTool{
+			Driver: SARIFDriver{
+				Name:            "Reconator",
+				Version:         e.data.Version,
+				InformationURI:  "https://github.com/rootsploit/reconator",
+				SemanticVersion: e.data.Version,
+				Rules:           []SARIFRule{},
+			},
+		},
+		Results: []SARIFResult{},
+	}
+
+	// Track unique rules
+	ruleMap := make(map[string]bool)
+
+	// Add vulnerabilities
+	if e.data.VulnScan != nil {
+		for _, v := range e.data.VulnScan.Vulnerabilities {
+			// Generate rule ID from template ID or name
+			ruleID := v.TemplateID
+			if ruleID == "" {
+				ruleID = strings.ToLower(strings.ReplaceAll(v.Name, " ", "-"))
+			}
+
+			// Add rule if not seen
+			if !ruleMap[ruleID] {
+				ruleMap[ruleID] = true
+				rule := SARIFRule{
+					ID:   ruleID,
+					Name: v.Name,
+					ShortDescription: SARIFMessage{
+						Text: v.Name,
+					},
+					FullDescription: SARIFMessage{
+						Text: v.Description,
+					},
+					DefaultConfiguration: SARIFConfiguration{
+						Level: severityToSARIFLevel(v.Severity),
+					},
+					Properties: SARIFRuleProperties{
+						SecuritySeverity: severityToScore(v.Severity),
+						Tags:             []string{"security", v.Type},
+					},
+				}
+				if v.CWE != "" {
+					rule.Properties.Tags = append(rule.Properties.Tags, "cwe-"+v.CWE)
+				}
+				run.Tool.Driver.Rules = append(run.Tool.Driver.Rules, rule)
+			}
+
+			// Add result
+			result := SARIFResult{
+				RuleID:  ruleID,
+				Level:   severityToSARIFLevel(v.Severity),
+				Message: SARIFMessage{Text: v.Description},
+				Locations: []SARIFLocation{
+					{
+						PhysicalLocation: SARIFPhysicalLocation{
+							ArtifactLocation: SARIFArtifactLocation{
+								URI: v.URL,
+							},
+						},
+					},
+				},
+			}
+
+			// Add fingerprint for deduplication
+			if v.URL != "" {
+				result.PartialFingerprints = map[string]string{
+					"primaryLocationLineHash": fmt.Sprintf("%x", hashString(v.URL+ruleID)),
+				}
+			}
+
+			run.Results = append(run.Results, result)
+		}
+	}
+
+	// Add takeover vulnerabilities
+	if e.data.Takeover != nil {
+		ruleID := "subdomain-takeover"
+		if !ruleMap[ruleID] {
+			ruleMap[ruleID] = true
+			run.Tool.Driver.Rules = append(run.Tool.Driver.Rules, SARIFRule{
+				ID:   ruleID,
+				Name: "Subdomain Takeover",
+				ShortDescription: SARIFMessage{
+					Text: "Subdomain takeover vulnerability",
+				},
+				FullDescription: SARIFMessage{
+					Text: "A subdomain is pointing to an external service that can be claimed by an attacker",
+				},
+				DefaultConfiguration: SARIFConfiguration{
+					Level: "error",
+				},
+				Properties: SARIFRuleProperties{
+					SecuritySeverity: "9.0",
+					Tags:             []string{"security", "takeover", "cwe-1395"},
+				},
+			})
+		}
+
+		for _, t := range e.data.Takeover.Vulnerable {
+			result := SARIFResult{
+				RuleID: ruleID,
+				Level:  "error",
+				Message: SARIFMessage{
+					Text: fmt.Sprintf("Subdomain %s is vulnerable to takeover via %s", t.Subdomain, t.Service),
+				},
+				Locations: []SARIFLocation{
+					{
+						PhysicalLocation: SARIFPhysicalLocation{
+							ArtifactLocation: SARIFArtifactLocation{
+								URI: "https://" + t.Subdomain,
+							},
+						},
+					},
+				},
+				PartialFingerprints: map[string]string{
+					"primaryLocationLineHash": fmt.Sprintf("%x", hashString(t.Subdomain+t.Service)),
+				},
+			}
+			run.Results = append(run.Results, result)
+		}
+	}
+
+	// Add exposed secrets from JS analysis
+	if e.data.JSAnalysis != nil {
+		for _, secret := range e.data.JSAnalysis.Secrets {
+			ruleID := "exposed-secret-" + strings.ToLower(strings.ReplaceAll(secret.Type, " ", "-"))
+			if !ruleMap[ruleID] {
+				ruleMap[ruleID] = true
+				run.Tool.Driver.Rules = append(run.Tool.Driver.Rules, SARIFRule{
+					ID:   ruleID,
+					Name: "Exposed Secret: " + secret.Type,
+					ShortDescription: SARIFMessage{
+						Text: "Exposed " + secret.Type + " in JavaScript",
+					},
+					FullDescription: SARIFMessage{
+						Text: "A sensitive credential or secret was found exposed in client-side JavaScript code",
+					},
+					DefaultConfiguration: SARIFConfiguration{
+						Level: "error",
+					},
+					Properties: SARIFRuleProperties{
+						SecuritySeverity: "8.0",
+						Tags:             []string{"security", "secrets", "cwe-798"},
+					},
+				})
+			}
+
+			result := SARIFResult{
+				RuleID: ruleID,
+				Level:  "error",
+				Message: SARIFMessage{
+					Text: fmt.Sprintf("Exposed %s found in %s", secret.Type, secret.Source),
+				},
+				Locations: []SARIFLocation{
+					{
+						PhysicalLocation: SARIFPhysicalLocation{
+							ArtifactLocation: SARIFArtifactLocation{
+								URI: secret.Source,
+							},
+						},
+					},
+				},
+			}
+			run.Results = append(run.Results, result)
+		}
+	}
+
+	sarif.Runs = append(sarif.Runs, run)
+
+	// Write SARIF file
+	path := filepath.Join(exportDir, "reconator.sarif")
+	f, err := os.Create(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	encoder := json.NewEncoder(f)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(sarif); err != nil {
+		return "", err
+	}
+
+	return path, nil
+}
+
+// SARIF format types (OASIS SARIF 2.1.0 specification)
+type SARIFReport struct {
+	Schema  string     `json:"$schema"`
+	Version string     `json:"version"`
+	Runs    []SARIFRun `json:"runs"`
+}
+
+type SARIFRun struct {
+	Tool    SARIFTool     `json:"tool"`
+	Results []SARIFResult `json:"results"`
+}
+
+type SARIFTool struct {
+	Driver SARIFDriver `json:"driver"`
+}
+
+type SARIFDriver struct {
+	Name            string      `json:"name"`
+	Version         string      `json:"version"`
+	InformationURI  string      `json:"informationUri"`
+	SemanticVersion string      `json:"semanticVersion"`
+	Rules           []SARIFRule `json:"rules"`
+}
+
+type SARIFRule struct {
+	ID                   string              `json:"id"`
+	Name                 string              `json:"name"`
+	ShortDescription     SARIFMessage        `json:"shortDescription"`
+	FullDescription      SARIFMessage        `json:"fullDescription,omitempty"`
+	DefaultConfiguration SARIFConfiguration  `json:"defaultConfiguration"`
+	Properties           SARIFRuleProperties `json:"properties,omitempty"`
+}
+
+type SARIFMessage struct {
+	Text string `json:"text"`
+}
+
+type SARIFConfiguration struct {
+	Level string `json:"level"`
+}
+
+type SARIFRuleProperties struct {
+	SecuritySeverity string   `json:"security-severity,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
+}
+
+type SARIFResult struct {
+	RuleID              string            `json:"ruleId"`
+	Level               string            `json:"level"`
+	Message             SARIFMessage      `json:"message"`
+	Locations           []SARIFLocation   `json:"locations,omitempty"`
+	PartialFingerprints map[string]string `json:"partialFingerprints,omitempty"`
+}
+
+type SARIFLocation struct {
+	PhysicalLocation SARIFPhysicalLocation `json:"physicalLocation"`
+}
+
+type SARIFPhysicalLocation struct {
+	ArtifactLocation SARIFArtifactLocation `json:"artifactLocation"`
+}
+
+type SARIFArtifactLocation struct {
+	URI string `json:"uri"`
+}
+
+// Helper function to convert severity to SARIF level
+func severityToSARIFLevel(severity string) string {
+	switch strings.ToLower(severity) {
+	case "critical", "high":
+		return "error"
+	case "medium":
+		return "warning"
+	case "low", "info":
+		return "note"
+	default:
+		return "none"
+	}
+}
+
+// Helper function to convert severity to security-severity score (0.0-10.0)
+func severityToScore(severity string) string {
+	switch strings.ToLower(severity) {
+	case "critical":
+		return "9.5"
+	case "high":
+		return "8.0"
+	case "medium":
+		return "5.5"
+	case "low":
+		return "3.0"
+	case "info":
+		return "1.0"
+	default:
+		return "0.0"
+	}
+}
+
+// Simple hash function for fingerprinting
+func hashString(s string) uint32 {
+	h := uint32(0)
+	for _, c := range s {
+		h = h*31 + uint32(c)
+	}
+	return h
+}
+
 // Export types for JSON
 type MetadataExport struct {
 	Target    string `json:"target"`
@@ -591,4 +908,238 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// GenerateCSVContent generates CSV content as bytes for direct download
+func (e *Exporter) GenerateCSVContent() ([]byte, error) {
+	var buf strings.Builder
+	w := csv.NewWriter(&buf)
+
+	// Header
+	w.Write([]string{"type", "severity", "name", "host", "url", "template_id", "tool", "description"})
+
+	// Add subdomains
+	if e.data.Subdomain != nil {
+		for _, sub := range e.data.Subdomain.Subdomains {
+			w.Write([]string{"subdomain", "", sub, sub, "", "", "enumeration", ""})
+		}
+	}
+
+	// Add vulnerabilities
+	if e.data.VulnScan != nil {
+		for _, v := range e.data.VulnScan.Vulnerabilities {
+			w.Write([]string{
+				"vulnerability",
+				v.Severity,
+				v.Name,
+				v.Host,
+				v.URL,
+				v.TemplateID,
+				v.Tool,
+				v.Description,
+			})
+		}
+	}
+
+	// Add takeover vulns
+	if e.data.Takeover != nil {
+		for _, t := range e.data.Takeover.Vulnerable {
+			w.Write([]string{
+				"takeover",
+				"critical",
+				"Subdomain Takeover",
+				t.Subdomain,
+				"",
+				"",
+				"dnstake",
+				fmt.Sprintf("Vulnerable via %s", t.Service),
+			})
+		}
+	}
+
+	// Add ports
+	if e.data.Ports != nil {
+		for host, ports := range e.data.Ports.OpenPorts {
+			for _, port := range ports {
+				w.Write([]string{
+					"port",
+					"info",
+					fmt.Sprintf("Open Port %d", port),
+					host,
+					"",
+					"",
+					"naabu",
+					"",
+				})
+			}
+		}
+	}
+
+	w.Flush()
+	return []byte(buf.String()), nil
+}
+
+// GenerateJSONContent generates JSON content as bytes for direct download
+func (e *Exporter) GenerateJSONContent() ([]byte, error) {
+	exportData := struct {
+		Metadata     MetadataExport      `json:"metadata"`
+		Subdomains   []SubdomainExport   `json:"subdomains,omitempty"`
+		Vulns        []VulnExport        `json:"vulnerabilities,omitempty"`
+		Ports        []PortExport        `json:"ports,omitempty"`
+		Endpoints    []EndpointExport    `json:"endpoints,omitempty"`
+		Technologies map[string][]string `json:"technologies,omitempty"`
+	}{
+		Metadata: MetadataExport{
+			Target:    e.data.Target,
+			Version:   e.data.Version,
+			Date:      e.data.Date,
+			Duration:  e.data.Duration,
+			Generated: time.Now().Format(time.RFC3339),
+		},
+	}
+
+	if e.data.Subdomain != nil {
+		for _, sub := range e.data.Subdomain.Subdomains {
+			exportData.Subdomains = append(exportData.Subdomains, SubdomainExport{Name: sub})
+		}
+	}
+
+	if e.data.VulnScan != nil {
+		for _, v := range e.data.VulnScan.Vulnerabilities {
+			exportData.Vulns = append(exportData.Vulns, VulnExport{
+				Severity:    v.Severity,
+				Name:        v.Name,
+				TemplateID:  v.TemplateID,
+				Host:        v.Host,
+				URL:         v.URL,
+				Type:        v.Type,
+				Tool:        v.Tool,
+				Description: v.Description,
+			})
+		}
+	}
+
+	if e.data.Ports != nil {
+		for host, ports := range e.data.Ports.OpenPorts {
+			for _, port := range ports {
+				exportData.Ports = append(exportData.Ports, PortExport{
+					Host: host,
+					Port: port,
+				})
+			}
+		}
+	}
+
+	if e.data.JSAnalysis != nil {
+		for _, ep := range e.data.JSAnalysis.Endpoints {
+			exportData.Endpoints = append(exportData.Endpoints, EndpointExport{
+				Path:      ep.Path,
+				URL:       ep.URL,
+				Source:    ep.Source,
+				Sensitive: ep.Sensitive,
+			})
+		}
+	}
+
+	if e.data.Tech != nil {
+		exportData.Technologies = e.data.Tech.TechByHost
+	}
+
+	return json.MarshalIndent(exportData, "", "  ")
+}
+
+// GenerateSARIFContent generates SARIF content as bytes for direct download
+func (e *Exporter) GenerateSARIFContent() ([]byte, error) {
+	sarif := SARIFReport{
+		Schema:  "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+		Version: "2.1.0",
+		Runs:    []SARIFRun{},
+	}
+
+	run := SARIFRun{
+		Tool: SARIFTool{
+			Driver: SARIFDriver{
+				Name:            "Reconator",
+				Version:         e.data.Version,
+				InformationURI:  "https://github.com/rootsploit/reconator",
+				SemanticVersion: e.data.Version,
+				Rules:           []SARIFRule{},
+			},
+		},
+		Results: []SARIFResult{},
+	}
+
+	ruleMap := make(map[string]bool)
+
+	if e.data.VulnScan != nil {
+		for _, v := range e.data.VulnScan.Vulnerabilities {
+			ruleID := v.TemplateID
+			if ruleID == "" {
+				ruleID = strings.ToLower(strings.ReplaceAll(v.Name, " ", "-"))
+			}
+
+			if !ruleMap[ruleID] {
+				ruleMap[ruleID] = true
+				run.Tool.Driver.Rules = append(run.Tool.Driver.Rules, SARIFRule{
+					ID:               ruleID,
+					Name:             v.Name,
+					ShortDescription: SARIFMessage{Text: v.Name},
+					FullDescription:  SARIFMessage{Text: v.Description},
+					DefaultConfiguration: SARIFConfiguration{
+						Level: severityToSARIFLevel(v.Severity),
+					},
+					Properties: SARIFRuleProperties{
+						SecuritySeverity: severityToScore(v.Severity),
+						Tags:             []string{"security", v.Type},
+					},
+				})
+			}
+
+			run.Results = append(run.Results, SARIFResult{
+				RuleID:  ruleID,
+				Level:   severityToSARIFLevel(v.Severity),
+				Message: SARIFMessage{Text: v.Description},
+				Locations: []SARIFLocation{{
+					PhysicalLocation: SARIFPhysicalLocation{
+						ArtifactLocation: SARIFArtifactLocation{URI: v.URL},
+					},
+				}},
+			})
+		}
+	}
+
+	if e.data.Takeover != nil {
+		ruleID := "subdomain-takeover"
+		if !ruleMap[ruleID] {
+			ruleMap[ruleID] = true
+			run.Tool.Driver.Rules = append(run.Tool.Driver.Rules, SARIFRule{
+				ID:               ruleID,
+				Name:             "Subdomain Takeover",
+				ShortDescription: SARIFMessage{Text: "Subdomain takeover vulnerability"},
+				DefaultConfiguration: SARIFConfiguration{
+					Level: "error",
+				},
+				Properties: SARIFRuleProperties{
+					SecuritySeverity: "9.0",
+					Tags:             []string{"security", "takeover"},
+				},
+			})
+		}
+
+		for _, t := range e.data.Takeover.Vulnerable {
+			run.Results = append(run.Results, SARIFResult{
+				RuleID:  ruleID,
+				Level:   "error",
+				Message: SARIFMessage{Text: fmt.Sprintf("Subdomain %s vulnerable via %s", t.Subdomain, t.Service)},
+				Locations: []SARIFLocation{{
+					PhysicalLocation: SARIFPhysicalLocation{
+						ArtifactLocation: SARIFArtifactLocation{URI: "https://" + t.Subdomain},
+					},
+				}},
+			})
+		}
+	}
+
+	sarif.Runs = append(sarif.Runs, run)
+	return json.MarshalIndent(sarif, "", "  ")
 }

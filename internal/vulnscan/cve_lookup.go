@@ -44,34 +44,8 @@ func NewCVELookup(checker InstalledChecker) *CVELookup {
 	}
 }
 
-// skipCVELookup contains products that should NOT have CVE lookups
-// These are typically cloud services, CDNs, or generic terms that cause false positives
-var skipCVELookup = map[string]bool{
-	// Cloud storage services (not software you run)
-	"amazon s3":     true,
-	"amazon s 3":    true,
-	"aws s3":        true,
-	"s3":            true,
-	"google cloud":  true,
-	"azure storage": true,
-	"azure blob":    true,
-	// CDN providers (not software you run)
-	"cloudflare":   true,
-	"akamai":       true,
-	"fastly":       true,
-	"cloudfront":   true,
-	"jsdelivr":     true,
-	"cdnjs":        true,
-	"unpkg":        true,
-	// Generic terms that cause FPs
-	"cdn":          true,
-	"hosted":       true,
-	"api":          true,
-	"analytics":    true,
-	"tracking":     true,
-	"fonts":        true,
-	"google fonts": true,
-}
+// skipCVELookup is now defined in skip_list.go as SkipCVELookup (shared with aiguided scanner)
+// Use ShouldSkipCVELookup(product) to check if a product should be skipped
 
 // LookupCVEs looks up CVEs for a product/version using hybrid approach:
 // 1. Check local cache
@@ -83,7 +57,7 @@ func (l *CVELookup) LookupCVEs(product, version string) []CVEInfo {
 	product = normalizeProductName(product)
 
 	// Skip products that shouldn't have CVE lookups (cloud services, CDNs, etc.)
-	if skipCVELookup[strings.ToLower(product)] {
+	if ShouldSkipCVELookup(product) {
 		return nil
 	}
 

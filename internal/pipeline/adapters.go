@@ -47,11 +47,13 @@ func RegisterAllAdapters(exec *Executor, cfg *config.Config, checker *tools.Chec
 // SubdomainAdapter wraps subdomain.Enumerator as a PhaseExecutor
 type SubdomainAdapter struct {
 	enumerator *subdomain.Enumerator
+	cfg        *config.Config
 }
 
 func NewSubdomainAdapter(cfg *config.Config, checker *tools.Checker) *SubdomainAdapter {
 	return &SubdomainAdapter{
 		enumerator: subdomain.NewEnumerator(cfg, checker),
+		cfg:        cfg,
 	}
 }
 
@@ -63,6 +65,11 @@ func (a *SubdomainAdapter) Execute(ctx context.Context, input *PhaseInput) (*Pha
 		Phase:     PhaseSubdomain,
 		Status:    StatusRunning,
 		StartTime: start,
+	}
+
+	// Set up verbose step reporter if enabled
+	if a.cfg.VerboseProgress {
+		a.enumerator.SetReporter(subdomain.NewVerboseStepReporter())
 	}
 
 	// For ASN/IP targets, enumerate TLDs discovered by IPRange phase
@@ -657,8 +664,18 @@ func (a *VulnScanAdapter) Execute(ctx context.Context, input *PhaseInput) (*Phas
 		}
 	}
 
-	// Use tech-aware scanning when tech data is available
-	res, err := a.scanner.ScanWithTech(input.AliveHosts, categorized, techInput)
+	// Use enhanced parallel scanning which includes:
+	// - Tech-aware nuclei scanning
+	// - DNSTake for DNS takeover detection
+	// - CRLFuzz for CRLF injection
+	// - Parallel nuclei scan types (SSRF, XXE, etc.)
+	res, err := a.scanner.ScanWithParallel(
+		input.AliveHosts,
+		allURLs,
+		input.Subdomains, // Pass subdomains for DNSTake
+		categorized,
+		techInput,
+	)
 	result.EndTime = time.Now()
 	result.Duration = result.EndTime.Sub(start)
 

@@ -29,15 +29,19 @@ type Result struct {
 }
 
 type Vulnerability struct {
-	Host        string `json:"host"`
-	URL         string `json:"url,omitempty"`
-	TemplateID  string `json:"template_id"`
-	Name        string `json:"name"`
-	Severity    string `json:"severity"`
-	Type        string `json:"type"`
-	Description string `json:"description,omitempty"`
-	Matcher     string `json:"matcher,omitempty"`
-	Tool        string `json:"tool"`
+	Host        string  `json:"host"`
+	URL         string  `json:"url,omitempty"`
+	TemplateID  string  `json:"template_id"`
+	Name        string  `json:"name"`
+	Severity    string  `json:"severity"`
+	Type        string  `json:"type"`
+	Description string  `json:"description,omitempty"`
+	Matcher     string  `json:"matcher,omitempty"`
+	Tool        string  `json:"tool"`
+	CVSS        float64 `json:"cvss,omitempty"`        // CVSS score (0.0-10.0)
+	CVSSVector  string  `json:"cvss_vector,omitempty"` // CVSS vector string
+	CWE         string  `json:"cwe,omitempty"`         // CWE identifier (e.g., "CWE-79")
+	Reference   string  `json:"reference,omitempty"`   // Reference URL (CVE link, etc.)
 }
 
 type Scanner struct {
@@ -53,6 +57,13 @@ func NewScanner(cfg *config.Config, checker *tools.Checker) *Scanner {
 type TechInput struct {
 	TechByHost map[string][]string // host -> [technologies]
 	TechCount  map[string]int      // technology -> count across all hosts
+}
+
+// CDNInput contains CDN filtering data for prioritized scanning
+// BB-10: Non-CDN hosts have 3x more vulnerabilities than CDN-protected hosts
+type CDNInput struct {
+	NonCDNHosts []string // Hosts without CDN/WAF (priority targets)
+	CDNHosts    []string // Hosts behind CDN/WAF (scan with lighter templates)
 }
 
 // NucleiScanType represents a category of nuclei scan for parallel execution
@@ -250,51 +261,10 @@ var nucleiParallelScanTypes = []NucleiScanType{
 		Description: "SSL/TLS Information Gathering",
 		Category:    "web",
 	},
-	// SSH Security (ports: 22, 2222, 22222, 2022, 22022)
-	{
-		Name:        "SSH-Auth",
-		Tags:        []string{"ssh-password-auth", "ssh-auth-methods"},
-		Severity:    []string{"medium"},
-		Description: "SSH Authentication Issues (Password Auth Enabled)",
-		Category:    "network",
-	},
-	{
-		Name:        "SSH-Weak-Algo",
-		Tags:        []string{"ssh-weak-algo-supported", "ssh-cbc-mode-ciphers", "ssh-weak-mac-algo"},
-		Severity:    []string{"low"},
-		Description: "SSH Weak Algorithms",
-		Category:    "network",
-	},
-	{
-		Name:        "SSH-Detection",
-		Tags:        []string{"openssh-detect", "ssh-server-enumeration"},
-		Severity:    []string{"info"},
-		Description: "SSH Service Detection & Version",
-		Category:    "network",
-	},
-	// SMTP Security (ports: 25, 465, 587, 2525)
-	// Common issues: open relay, unauthenticated access, VRFY/EXPN commands
-	{
-		Name:        "SMTP-Open-Relay",
-		Tags:        []string{"smtp-open-relay", "open-relay"},
-		Severity:    []string{"high"},
-		Description: "SMTP Open Relay (Unauthenticated Mail Sending)",
-		Category:    "smtp",
-	},
-	{
-		Name:        "SMTP-Misconfig",
-		Tags:        []string{"smtp-vrfy-expn", "smtp-user-enum", "smtp-commands"},
-		Severity:    []string{"medium"},
-		Description: "SMTP Misconfigurations (VRFY/EXPN enabled, User Enumeration)",
-		Category:    "smtp",
-	},
-	{
-		Name:        "SMTP-Detection",
-		Tags:        []string{"smtp-detect", "smtp-service-detect", "smtp"},
-		Severity:    []string{"info"},
-		Description: "SMTP Service Detection & Banner",
-		Category:    "smtp",
-	},
+	// NOTE: SSH and SMTP scans are NOT included here because they're already
+	// handled by runNetworkScans() which runs in ScanWithTech(). Including them
+	// here would cause duplicate scanning. See runNetworkScans() for SSH/SMTP.
+	//
 	// Debug/Monitoring Endpoints Exposure
 	{
 		Name:        "Debug-Endpoints",
@@ -568,6 +538,79 @@ func (s *Scanner) Scan(hosts []string, categorizedURLs *historic.CategorizedURLs
 	return s.ScanWithTech(hosts, categorizedURLs, nil)
 }
 
+// ScanWithCDNPriority performs vulnerability scanning with CDN-aware prioritization
+// BB-10: Non-CDN hosts have 3x more vulnerabilities than CDN-protected hosts
+// This function prioritizes non-CDN hosts and uses lighter templates for CDN hosts
+func (s *Scanner) ScanWithCDNPriority(hosts []string, categorizedURLs *historic.CategorizedURLs, techInput *TechInput, cdnInput *CDNInput) (*Result, error) {
+	// If no CDN data provided, fall back to standard scanning
+	if cdnInput == nil || (len(cdnInput.NonCDNHosts) == 0 && len(cdnInput.CDNHosts) == 0) {
+		return s.ScanWithTech(hosts, categorizedURLs, techInput)
+	}
+
+	start := time.Now()
+	fmt.Println("    [*] BB-10: CDN-aware scanning enabled")
+	fmt.Printf("        Non-CDN hosts: %d (priority targets - 3x more vulns)\n", len(cdnInput.NonCDNHosts))
+	fmt.Printf("        CDN hosts: %d (lighter scan)\n", len(cdnInput.CDNHosts))
+
+	result := &Result{
+		TotalScanned:    len(hosts),
+		Vulnerabilities: []Vulnerability{},
+		BySeverity:      make(map[string]int),
+		ByType:          make(map[string]int),
+		ScanMode:        s.getScanMode(),
+	}
+
+	var allVulns []Vulnerability
+	var mu sync.Mutex
+
+	// Phase 1: Scan non-CDN hosts with full templates (priority)
+	if len(cdnInput.NonCDNHosts) > 0 {
+		fmt.Println("        [Phase 1] Scanning non-CDN hosts with full templates...")
+		nonCDNResult, err := s.ScanWithTech(cdnInput.NonCDNHosts, categorizedURLs, techInput)
+		if err == nil {
+			mu.Lock()
+			allVulns = append(allVulns, nonCDNResult.Vulnerabilities...)
+			if result.ScanMode == s.getScanMode() { // Preserve tech-aware mode if applicable
+				result.ScanMode = nonCDNResult.ScanMode
+				result.DetectedTech = nonCDNResult.DetectedTech
+				result.TargetedTags = nonCDNResult.TargetedTags
+				result.TechAwareScan = nonCDNResult.TechAwareScan
+			}
+			mu.Unlock()
+			fmt.Printf("        [Phase 1] Non-CDN scan: %d vulnerabilities found\n", len(nonCDNResult.Vulnerabilities))
+		}
+	}
+
+	// Phase 2: Scan CDN hosts with lighter templates (exposure/misconfig only)
+	if len(cdnInput.CDNHosts) > 0 {
+		fmt.Println("        [Phase 2] Scanning CDN hosts with lighter templates (exposure/misconfig)...")
+
+		// Create a lighter config for CDN hosts
+		lightCfg := *s.cfg
+		lightCfg.NucleiTags = "exposure,misconfig,default-login,cve" // Priority templates only
+		lightCfg.DeepScan = false                                    // Force fast mode
+
+		lightScanner := &Scanner{cfg: &lightCfg, c: s.c}
+		cdnResult, err := lightScanner.ScanWithTech(cdnInput.CDNHosts, nil, nil) // Skip URL scanning for CDN hosts
+		if err == nil {
+			mu.Lock()
+			allVulns = append(allVulns, cdnResult.Vulnerabilities...)
+			mu.Unlock()
+			fmt.Printf("        [Phase 2] CDN scan: %d vulnerabilities found\n", len(cdnResult.Vulnerabilities))
+		}
+	}
+
+	// Aggregate results
+	result.Vulnerabilities = allVulns
+	for _, v := range allVulns {
+		result.BySeverity[v.Severity]++
+		result.ByType[v.Type]++
+	}
+	result.Duration = time.Since(start)
+
+	return result, nil
+}
+
 // ScanWithTech performs tech-aware vulnerability scanning
 // When techInput is provided, nuclei scans target only technologies detected in the tech phase
 func (s *Scanner) ScanWithTech(hosts []string, categorizedURLs *historic.CategorizedURLs, techInput *TechInput) (*Result, error) {
@@ -753,6 +796,23 @@ func (s *Scanner) ScanWithTech(hosts []string, categorizedURLs *historic.Categor
 				}
 			}()
 		}
+	}
+
+	// BB-10: Run Host Header Injection tests (parallel with other scans)
+	// Tests for Host, X-Forwarded-Host, X-Host, X-Original-URL, X-Rewrite-URL injection
+	if len(hosts) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			qt := NewQuickTester(s.c, s.cfg.Threads)
+			hostHeaderVulns := qt.RunHostHeaderTests(hosts)
+			if len(hostHeaderVulns) > 0 {
+				mu.Lock()
+				result.Vulnerabilities = append(result.Vulnerabilities, hostHeaderVulns...)
+				mu.Unlock()
+				fmt.Printf("        host header tests: %d vulnerabilities found\n", len(hostHeaderVulns))
+			}
+		}()
 	}
 
 	// BB-9: Run SSH/SMTP network scans (parallel with other scans)
@@ -1127,10 +1187,11 @@ func (s *Scanner) dalfoxScan(urls []string) []Vulnerability {
 		args = append(args, "-w", fmt.Sprintf("%d", s.cfg.Threads))
 	}
 
-	// Dalfox timeout: 10 min for fast, 20 min for deep
-	timeout := 10 * time.Minute
+	// Dalfox timeout: 5 min for fast, 10 min for deep
+	// Reduced from 10/20 to avoid long waits on timeout
+	timeout := 5 * time.Minute
 	if s.cfg.DeepScan {
-		timeout = 20 * time.Minute
+		timeout = 10 * time.Minute
 	}
 
 	r := exec.Run("dalfox", args, &exec.Options{Timeout: timeout})
@@ -1424,55 +1485,8 @@ func (s *Scanner) runParallelNucleiScans(hosts []string, urls []string, subdomai
 		}
 	}
 
-	// Create SSH targets file for network category (SSH ports: 22, 2222, 22222, 2022, 22022)
-	var sshFile string
-	var cleanupSSH func()
-	if len(hosts) > 0 {
-		sshPorts := []string{"22", "2222", "22222", "2022", "22022"}
-		var sshTargets []string
-		for _, host := range hosts {
-			// Extract hostname from URL if needed
-			hostname := host
-			hostname = strings.TrimPrefix(hostname, "https://")
-			hostname = strings.TrimPrefix(hostname, "http://")
-			hostname = strings.Split(hostname, "/")[0]
-			hostname = strings.Split(hostname, ":")[0] // Remove any existing port
-
-			for _, port := range sshPorts {
-				sshTargets = append(sshTargets, fmt.Sprintf("%s:%s", hostname, port))
-			}
-		}
-		var err error
-		sshFile, cleanupSSH, err = exec.TempFile(strings.Join(sshTargets, "\n"), "-nuclei-ssh.txt")
-		if err == nil {
-			defer cleanupSSH()
-		}
-	}
-
-	// Create SMTP targets file for smtp category (SMTP ports: 25, 465, 587, 2525)
-	var smtpFile string
-	var cleanupSMTP func()
-	if len(hosts) > 0 {
-		smtpPorts := []string{"25", "465", "587", "2525"}
-		var smtpTargets []string
-		for _, host := range hosts {
-			// Extract hostname from URL if needed
-			hostname := host
-			hostname = strings.TrimPrefix(hostname, "https://")
-			hostname = strings.TrimPrefix(hostname, "http://")
-			hostname = strings.Split(hostname, "/")[0]
-			hostname = strings.Split(hostname, ":")[0] // Remove any existing port
-
-			for _, port := range smtpPorts {
-				smtpTargets = append(smtpTargets, fmt.Sprintf("%s:%s", hostname, port))
-			}
-		}
-		var err error
-		smtpFile, cleanupSMTP, err = exec.TempFile(strings.Join(smtpTargets, "\n"), "-nuclei-smtp.txt")
-		if err == nil {
-			defer cleanupSMTP()
-		}
-	}
+	// NOTE: SSH and SMTP target files are NOT created here because SSH/SMTP scans
+	// are handled by runNetworkScans() in ScanWithTech(). See that function for details.
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -1480,16 +1494,14 @@ func (s *Scanner) runParallelNucleiScans(hosts []string, urls []string, subdomai
 	scansRun := 0
 
 	// Run each scan type in parallel
+	// NOTE: "network" and "smtp" categories are NOT handled here - SSH/SMTP scans
+	// are performed by runNetworkScans() in ScanWithTech() to avoid duplication.
 	for _, scanType := range nucleiParallelScanTypes {
 		// Choose target file based on category
 		var targetFile string
 		switch scanType.Category {
 		case "dns":
 			targetFile = subdomainFile
-		case "network":
-			targetFile = sshFile // SSH targets with ports
-		case "smtp":
-			targetFile = smtpFile // SMTP targets with ports (25, 465, 587, 2525)
 		case "web":
 			if urlFile != "" {
 				targetFile = urlFile
@@ -1683,7 +1695,14 @@ func (s *Scanner) runCRLFuzz(urls []string) []Vulnerability {
 		args = append(args, "-c", fmt.Sprintf("%d", s.cfg.Threads))
 	}
 
-	r := exec.Run("crlfuzz", args, &exec.Options{Timeout: 10 * time.Minute})
+	// CRLFuzz timeout: 5 min for fast, 10 min for deep
+	// Reduced from flat 10 min to avoid long waits on timeout
+	crlfuzzTimeout := 5 * time.Minute
+	if s.cfg.DeepScan {
+		crlfuzzTimeout = 10 * time.Minute
+	}
+
+	r := exec.Run("crlfuzz", args, &exec.Options{Timeout: crlfuzzTimeout})
 	if r.Error != nil {
 		return nil
 	}

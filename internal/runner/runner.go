@@ -39,8 +39,304 @@ type Runner struct {
 	out *output.Manager
 }
 
+// ProgressUpdate represents a scan progress update for WebSocket broadcasting
+type ProgressUpdate struct {
+	Phase    string `json:"phase"`
+	Progress int    `json:"progress"` // 0-100
+	Message  string `json:"message,omitempty"`
+}
+
 func New(cfg *config.Config) *Runner {
 	return &Runner{cfg: cfg, c: tools.NewChecker()}
+}
+
+// RunWithContext runs the scan with context cancellation and progress updates
+// This method is used by the web dashboard for live progress tracking
+func (r *Runner) RunWithContext(ctx context.Context, progressCh chan<- ProgressUpdate) error {
+	start := time.Now()
+
+	if missing := r.c.GetMissingRequired(); len(missing) > 0 {
+		progressCh <- ProgressUpdate{Phase: "init", Progress: 0, Message: fmt.Sprintf("Missing tools: %v", missing)}
+	}
+
+	targets, err := r.getTargets()
+	if err != nil {
+		return err
+	}
+
+	progressCh <- ProgressUpdate{Phase: "init", Progress: 0, Message: fmt.Sprintf("Starting reconnaissance for %d target(s)", len(targets))}
+
+	// Process each target
+	totalTargets := len(targets)
+	for i, t := range targets {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			baseProgress := (i * 95 / totalTargets) // 0-95% range
+			if err := r.processWithContext(ctx, t, progressCh, baseProgress); err != nil {
+				progressCh <- ProgressUpdate{Phase: "error", Progress: baseProgress, Message: fmt.Sprintf("Error processing %s: %v", t, err)}
+			}
+		}
+	}
+
+	progressCh <- ProgressUpdate{Phase: "complete", Progress: 100, Message: fmt.Sprintf("Reconnaissance complete in %s", time.Since(start).Round(time.Second))}
+	return nil
+}
+
+// processWithContext processes a single target with context support
+func (r *Runner) processWithContext(ctx context.Context, target string, progressCh chan<- ProgressUpdate, baseProgress int) error {
+	// Check for context cancellation
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	// Check if target is ASN or IP range
+	if iprange.IsASN(target) || iprange.IsIPTarget(target) {
+		progressCh <- ProgressUpdate{Phase: "discovery", Progress: baseProgress, Message: fmt.Sprintf("Processing %s as IP/ASN target", target)}
+		// For now, skip these in web dashboard (complex multi-domain processing)
+		return nil
+	}
+
+	outDir := filepath.Join(r.cfg.OutputDir, target)
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return err
+	}
+
+	// Initialize output manager
+	if r.cfg.EnableSQLite {
+		var err error
+		r.out, err = output.NewManagerWithSQLite(outDir)
+		if err != nil {
+			r.out = output.NewManager(outDir)
+		}
+	} else {
+		r.out = output.NewManager(outDir)
+	}
+	defer r.out.Close()
+	r.out.SetScanMeta(target, version.Version)
+
+	var subs, allSubs, alive, directHosts []string
+	var subRes *subdomain.Result
+	var takeoverRes *takeover.Result
+	var historicRes *historic.Result
+	var wafRes *waf.Result
+	var portsRes *portscan.Result
+
+	// Phase 1: Subdomain Enumeration
+	if r.cfg.ShouldRunPhase("subdomain") || r.cfg.ShouldRunPhase("all") {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		progressCh <- ProgressUpdate{Phase: "subdomain", Progress: baseProgress, Message: "Enumerating subdomains"}
+		e := subdomain.NewEnumerator(r.cfg, r.c)
+		res, err := e.Enumerate(target)
+		if err != nil {
+			return err
+		}
+		subRes = res
+		subs = res.Subdomains
+		allSubs = res.AllSubdomains
+		r.out.SaveSubdomains(subRes)
+		progressCh <- ProgressUpdate{Phase: "subdomain", Progress: baseProgress + 10, Message: fmt.Sprintf("Found %d subdomains", len(subs))}
+	}
+
+	// Phase 2: WAF Detection (parallel with takeover)
+	var wg sync.WaitGroup
+	var wafMu, takeoverMu, historicMu sync.Mutex
+
+	if !r.cfg.PassiveMode && (r.cfg.ShouldRunPhase("waf") || r.cfg.ShouldRunPhase("all")) && len(subs) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d := waf.NewDetector(r.cfg, r.c)
+			if res, err := d.Detect(subs); err == nil {
+				wafMu.Lock()
+				wafRes = res
+				directHosts = res.DirectHosts
+				wafMu.Unlock()
+				r.out.SaveWAFResults(res)
+			}
+		}()
+	}
+
+	// Phase 4: Takeover Check (parallel)
+	if (r.cfg.ShouldRunPhase("takeover") || r.cfg.ShouldRunPhase("all")) && len(allSubs) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tc := takeover.NewChecker(r.cfg, r.c)
+			if res, err := tc.Check(allSubs); err == nil {
+				takeoverMu.Lock()
+				takeoverRes = res
+				takeoverMu.Unlock()
+				r.out.SaveTakeoverResults(res)
+			}
+		}()
+	}
+
+	// Phase 5: Historic URLs (parallel)
+	if r.cfg.ShouldRunPhase("historic") || r.cfg.ShouldRunPhase("all") {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			hc := historic.NewCollector(r.cfg, r.c)
+			if res, err := hc.Collect(target, nil); err == nil {
+				historicMu.Lock()
+				historicRes = res
+				historicMu.Unlock()
+			}
+		}()
+	}
+
+	progressCh <- ProgressUpdate{Phase: "parallel", Progress: baseProgress + 20, Message: "Running WAF/Takeover/Historic checks"}
+	wg.Wait()
+
+	// Save historic results
+	if historicRes != nil {
+		r.out.SaveHistoricResults(historicRes)
+	}
+
+	// Phase 3: Port Scanning
+	if !r.cfg.PassiveMode && (r.cfg.ShouldRunPhase("ports") || r.cfg.ShouldRunPhase("all")) && len(subs) > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		progressCh <- ProgressUpdate{Phase: "ports", Progress: baseProgress + 30, Message: "Scanning ports"}
+		s := portscan.NewScanner(r.cfg, r.c)
+		if res, err := s.Scan(subs); err == nil {
+			portsRes = res
+			alive = res.AliveHosts
+			r.out.SavePortResults(res)
+			progressCh <- ProgressUpdate{Phase: "ports", Progress: baseProgress + 40, Message: fmt.Sprintf("Found %d open ports, %d alive hosts", res.TotalPorts, len(alive))}
+		}
+	}
+
+	// Phase 6: Tech Detection
+	var techRes *techdetect.Result
+	// Run tech detection if not in passive mode OR if explicitly selected with passive mode
+	if (r.cfg.ShouldRunPhase("tech") || r.cfg.ShouldRunPhase("all")) && len(subs) > 0 {
+		// Skip only if passive mode AND not explicitly requested
+		skipTech := r.cfg.PassiveMode && !r.cfg.ShouldRunPhase("tech")
+		if !skipTech {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			progressCh <- ProgressUpdate{Phase: "tech", Progress: baseProgress + 50, Message: "Detecting technologies"}
+			td := techdetect.NewDetector(r.cfg, r.c)
+			if res, err := td.Detect(subs); err == nil {
+				techRes = res
+				r.out.SaveTechResults(res)
+			}
+		}
+	}
+
+	// Phase 6b: Screenshots (run after tech detection)
+	var screenshotRes *screenshot.Result
+	// Use alive hosts if available (from port scan), otherwise use validated subdomains
+	hostsForScreenshots := alive
+	if len(hostsForScreenshots) == 0 && len(subs) > 0 {
+		hostsForScreenshots = subs
+	}
+
+	if r.cfg.EnableScreenshots && len(hostsForScreenshots) > 0 {
+		// Skip only if passive mode AND not explicitly requested
+		skipScreenshots := r.cfg.PassiveMode && !r.cfg.ShouldRunPhase("screenshot")
+		if !skipScreenshots {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			progressCh <- ProgressUpdate{Phase: "screenshot", Progress: baseProgress + 55, Message: "Capturing screenshots"}
+			sc := screenshot.NewCapturer(r.cfg, r.c)
+
+			// Use port-aware capture if we have portscan results
+			var err error
+			if portsRes != nil && len(portsRes.OpenPorts) > 0 {
+				screenshotRes, err = sc.CaptureWithPorts(hostsForScreenshots, portsRes.OpenPorts, r.cfg.OutputDir)
+			} else {
+				screenshotRes, err = sc.CaptureWithResult(hostsForScreenshots)
+			}
+
+			if err == nil && screenshotRes != nil && !screenshotRes.Skipped {
+				r.out.SaveScreenshotResults(screenshotRes)
+				progressCh <- ProgressUpdate{Phase: "screenshot", Progress: baseProgress + 60, Message: fmt.Sprintf("Captured %d screenshots", screenshotRes.TotalCaptures)}
+			}
+		}
+	}
+
+	// Phase 7: Directory Bruteforce
+	var dirRes *dirbrute.Result
+	if !r.cfg.PassiveMode && !r.cfg.SkipDirBrute && (r.cfg.ShouldRunPhase("dirbrute") || r.cfg.ShouldRunPhase("all")) && len(alive) > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		progressCh <- ProgressUpdate{Phase: "dirbrute", Progress: baseProgress + 65, Message: "Running directory bruteforce"}
+		hostsToScan, _ := filterNonWAFHosts(alive, directHosts)
+		if len(hostsToScan) > 0 {
+			ds := dirbrute.NewScanner(r.cfg, r.c)
+			if res, err := ds.Scan(hostsToScan); err == nil {
+				dirRes = res
+				r.out.SaveDirBruteResults(res)
+			}
+		}
+	}
+
+	// Phase 8: Vulnerability Scanning
+	var vulnRes *vulnscan.Result
+	if !r.cfg.PassiveMode && !r.cfg.SkipVulnScan && (r.cfg.ShouldRunPhase("vulnscan") || r.cfg.ShouldRunPhase("all")) && len(alive) > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		progressCh <- ProgressUpdate{Phase: "vulnscan", Progress: baseProgress + 75, Message: "Scanning for vulnerabilities"}
+		vs := vulnscan.NewScanner(r.cfg, r.c)
+		if res, err := vs.Scan(alive, nil); err == nil {
+			vulnRes = res
+			r.out.SaveVulnResults(res)
+			progressCh <- ProgressUpdate{Phase: "vulnscan", Progress: baseProgress + 85, Message: fmt.Sprintf("Found %d vulnerabilities", len(res.Vulnerabilities))}
+		}
+	}
+
+	// Generate HTML Report
+	if r.cfg.GenerateReport {
+		progressCh <- ProgressUpdate{Phase: "report", Progress: baseProgress + 90, Message: "Generating report"}
+		reportData := &report.Data{
+			Target:     target,
+			Version:    version.Version,
+			Date:       time.Now().Format(time.RFC1123),
+			Duration:   time.Since(time.Now()).Round(time.Second).String(),
+			Subdomain:  subRes,
+			WAF:        wafRes,
+			Ports:      portsRes,
+			Takeover:   takeoverRes,
+			Historic:   historicRes,
+			Tech:       techRes,
+			Screenshot: screenshotRes,
+			DirBrute:   dirRes,
+			VulnScan:   vulnRes,
+		}
+		report.Generate(reportData, outDir)
+	}
+
+	r.out.SaveSummary(target)
+
+	// Suppress unused variable warnings
+	_ = baseProgress
+
+	return nil
 }
 
 func (r *Runner) Run() error {
@@ -499,11 +795,37 @@ func (r *Runner) process(target string) error {
 		cyan.Println("[Phase 8] Vulnerability Scanning")
 		fmt.Println("─────────────────────────────────────────────────")
 		vs := vulnscan.NewScanner(r.cfg, r.c)
-		if res, err := vs.Scan(alive, categorizedURLs); err == nil {
-			vulnRes = res
-			green.Printf("    Vulnerabilities: %d (Critical: %d, High: %d)\n\n",
-				len(res.Vulnerabilities), res.BySeverity["critical"], res.BySeverity["high"])
-			r.out.SaveVulnResults(res)
+
+		// BB-10: Use CDN-aware scanning if port results contain CDN data
+		if portsRes != nil && (len(portsRes.NonCDNHosts) > 0 || len(portsRes.CDNHosts) > 0) {
+			cdnInput := &vulnscan.CDNInput{
+				NonCDNHosts: portsRes.NonCDNHosts,
+				CDNHosts:    portsRes.CDNHosts,
+			}
+
+			// Tech-aware input if available
+			var techInput *vulnscan.TechInput
+			if techRes != nil {
+				techInput = &vulnscan.TechInput{
+					TechByHost: techRes.TechByHost,
+					TechCount:  techRes.TechCount,
+				}
+			}
+
+			if res, err := vs.ScanWithCDNPriority(alive, categorizedURLs, techInput, cdnInput); err == nil {
+				vulnRes = res
+				green.Printf("    Vulnerabilities: %d (Critical: %d, High: %d)\n\n",
+					len(res.Vulnerabilities), res.BySeverity["critical"], res.BySeverity["high"])
+				r.out.SaveVulnResults(res)
+			}
+		} else {
+			// Fallback to standard scanning if no CDN data
+			if res, err := vs.Scan(alive, categorizedURLs); err == nil {
+				vulnRes = res
+				green.Printf("    Vulnerabilities: %d (Critical: %d, High: %d)\n\n",
+					len(res.Vulnerabilities), res.BySeverity["critical"], res.BySeverity["high"])
+				r.out.SaveVulnResults(res)
+			}
 		}
 	} else if r.cfg.PassiveMode || r.cfg.SkipVulnScan {
 		yellow.Println("[Phase 8] Vulnerability Scanning... SKIPPED")

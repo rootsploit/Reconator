@@ -627,6 +627,52 @@ func (m *Manager) TestOSINTKey(provider string, key string) TestResult {
 	case "urlscan":
 		testURL = "https://urlscan.io/api/v1/search/?q=domain:example.com&size=1"
 		headers = map[string]string{"API-Key": key}
+	case "binaryedge":
+		testURL = "https://api.binaryedge.io/v2/user/subscription"
+		headers = map[string]string{"X-Key": key}
+	case "intelx":
+		testURL = "https://2.intelx.io/authenticate/info"
+		headers = map[string]string{"x-key": key}
+	case "chaos":
+		testURL = "https://dns.projectdiscovery.io/dns/example.com/subdomains"
+		headers = map[string]string{"Authorization": key}
+	case "whoisxmlapi":
+		testURL = fmt.Sprintf("https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey=%s&domainName=example.com&outputFormat=JSON", key)
+	case "zoomeye":
+		testURL = "https://api.zoomeye.org/resources-info"
+		headers = map[string]string{"API-KEY": key}
+	case "fofa":
+		// Fofa uses email:key format
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 {
+			result.Error = "invalid format, expected email:key"
+			return result
+		}
+		testURL = fmt.Sprintf("https://fofa.info/api/v1/info/my?email=%s&key=%s", parts[0], parts[1])
+	case "quake":
+		testURL = "https://quake.360.cn/api/v3/user/info"
+		headers = map[string]string{"X-QuakeToken": key}
+	case "netlas":
+		testURL = "https://app.netlas.io/api/users/current/"
+		headers = map[string]string{"X-API-Key": key}
+	case "fullhunt":
+		testURL = "https://fullhunt.io/api/v1/auth/status"
+		headers = map[string]string{"X-API-KEY": key}
+	case "certspotter":
+		testURL = "https://api.certspotter.com/v1/issuances?domain=example.com"
+		headers = map[string]string{"Authorization": "Bearer " + key}
+	case "bufferover":
+		testURL = fmt.Sprintf("https://tls.bufferover.run/dns?q=example.com&apikey=%s", key)
+	case "c99":
+		testURL = fmt.Sprintf("https://api.c99.nl/subdomainfinder?key=%s&domain=example.com&json", key)
+	case "passivetotal":
+		// PassiveTotal uses username:key format
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 {
+			result.Error = "invalid format, expected username:api_key"
+			return result
+		}
+		testURL = "https://api.passivetotal.org/v2/account"
 	default:
 		result.Error = "testing not implemented"
 		return result
@@ -643,7 +689,9 @@ func (m *Manager) TestOSINTKey(provider string, key string) TestResult {
 		req.Header.Set(k, v)
 	}
 
-	if provider == "censys" {
+	// Handle special auth formats
+	switch provider {
+	case "censys", "passivetotal":
 		parts := strings.SplitN(key, ":", 2)
 		req.SetBasicAuth(parts[0], parts[1])
 	}
@@ -699,6 +747,8 @@ func (m *Manager) TestAIKey(provider string, key string) TestResult {
 	case "deepseek":
 		testURL = "https://api.deepseek.com/v1/models"
 		headers = map[string]string{"Authorization": "Bearer " + key}
+	case "gemini", "google":
+		testURL = fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models?key=%s", key)
 	default:
 		result.Error = "testing not implemented"
 		return result

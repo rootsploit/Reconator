@@ -115,27 +115,39 @@ func (pp *PhaseProgress) SetCounts(phase pipeline.Phase, metrics map[string]int)
 	}
 }
 
-// PrintPhaseList prints all phases in sequence (sorted by phase number)
+// PrintPhaseList prints all phases in sequence (sorted by phase number) - Osmedeus-style
 func (pp *PhaseProgress) PrintPhaseList() {
 	if pp.debug {
 		return // Debug mode skips this
 	}
 
-	cyan := color.New(color.FgCyan)
+	cyan := color.New(color.FgCyan, color.Bold)
+	white := color.New(color.FgWhite, color.Bold)
 	dim := color.New(color.Faint)
 
-	cyan.Println("\nPhases:")
-	fmt.Println("───────────────────────────────────────────────────")
+	fmt.Println()
+	cyan.Println("┌──────────────────────────────────────────────────┐")
+	cyan.Print("│")
+	white.Print("              RECONNAISSANCE PHASES               ")
+	cyan.Println("│")
+	cyan.Println("├──────────────────────────────────────────────────┤")
 
 	// Get phases sorted by phase number (0, 1, 2, ... 11)
 	phases := pp.getSortedPhases()
 
-	for _, phase := range phases {
+	for i, phase := range phases {
 		num := pipeline.PhaseNumber[phase]
 		name := pipeline.PhaseName[phase]
-		dim.Printf("  ○ [%2d] %s\n", num, name)
+		cyan.Print("│  ")
+		dim.Printf("○ [%2d] %-38s", num, name)
+		cyan.Println("│")
+
+		// Add separator every 4 phases for visual grouping
+		if (i+1)%4 == 0 && i < len(phases)-1 {
+			cyan.Println("│                                                  │")
+		}
 	}
-	fmt.Println("───────────────────────────────────────────────────")
+	cyan.Println("└──────────────────────────────────────────────────┘")
 	fmt.Println()
 }
 
@@ -148,9 +160,8 @@ func (pp *PhaseProgress) getSortedPhases() []pipeline.Phase {
 	return phases
 }
 
-// printPhaseStatus prints status update for a single phase
+// printPhaseStatus prints status update for a single phase (Osmedeus-style)
 func (pp *PhaseProgress) printPhaseStatus(phase pipeline.Phase, status string, duration time.Duration, counts map[string]int) {
-	num := pipeline.PhaseNumber[phase]
 	name := pipeline.PhaseName[phase]
 	icon := getStatusIcon(status)
 
@@ -158,23 +169,88 @@ func (pp *PhaseProgress) printPhaseStatus(phase pipeline.Phase, status string, d
 	yellow := color.New(color.FgYellow)
 	red := color.New(color.FgRed)
 	cyan := color.New(color.FgCyan)
+	white := color.New(color.FgWhite, color.Bold)
 	dim := color.New(color.Faint)
 
+	// Format: ├── [icon] Phase Name                    (duration) [metrics]
 	switch status {
 	case "running":
-		cyan.Printf("  %s [%2d] %s ", icon, num, name)
+		cyan.Print("├── ")
+		white.Printf("[%s] ", icon)
+		cyan.Printf("%-25s ", name)
 		dim.Println("running...")
 	case "completed":
-		green.Printf("  %s [%2d] %s ", icon, num, name)
+		green.Print("├── ")
+		white.Printf("[%s] ", icon)
+		green.Printf("%-25s ", name)
 		if duration > 0 {
-			dim.Printf("(%s)", formatDuration(duration))
+			dim.Printf("%-8s ", formatDuration(duration))
 		}
-		pp.printCountsSummary(counts)
+		pp.printCountsSummaryClean(counts)
 		fmt.Println()
 	case "failed":
-		red.Printf("  %s [%2d] %s FAILED\n", icon, num, name)
+		red.Print("├── ")
+		white.Printf("[%s] ", icon)
+		red.Printf("%-25s ", name)
+		red.Println("FAILED")
 	case "skipped":
-		yellow.Printf("  %s [%2d] %s skipped\n", icon, num, name)
+		yellow.Print("├── ")
+		white.Printf("[%s] ", icon)
+		dim.Printf("%-25s ", name)
+		dim.Println("skipped")
+	}
+}
+
+// printCountsSummaryClean prints key counts in a clean format (max 4 items)
+func (pp *PhaseProgress) printCountsSummaryClean(counts map[string]int) {
+	if len(counts) == 0 {
+		return
+	}
+
+	cyan := color.New(color.FgCyan)
+	white := color.New(color.FgWhite)
+
+	// Priority order for display
+	priority := []string{
+		"subdomains", "validated", "alive_hosts", "alive",
+		"urls", "vulnerabilities", "critical", "high",
+		"screenshots", "techs", "discoveries",
+	}
+
+	var items []string
+	shown := make(map[string]bool)
+
+	// Show priority items first
+	for _, key := range priority {
+		if count, ok := counts[key]; ok && count > 0 {
+			items = append(items, fmt.Sprintf("%s: %d", key, count))
+			shown[key] = true
+			if len(items) >= 4 {
+				break
+			}
+		}
+	}
+
+	// If we have room, add other non-zero counts
+	if len(items) < 4 {
+		for key, count := range counts {
+			if count > 0 && !shown[key] {
+				items = append(items, fmt.Sprintf("%s: %d", key, count))
+				if len(items) >= 4 {
+					break
+				}
+			}
+		}
+	}
+
+	if len(items) > 0 {
+		cyan.Print("│ ")
+		for i, item := range items {
+			white.Print(item)
+			if i < len(items)-1 {
+				cyan.Print(" │ ")
+			}
+		}
 	}
 }
 
@@ -228,14 +304,16 @@ func (pp *PhaseProgress) printCountsSummary(counts map[string]int) {
 	}
 }
 
-// PrintLevelHeader prints a level header
+// PrintLevelHeader prints a level header (Osmedeus-style)
 func (pp *PhaseProgress) PrintLevelHeader(level int, phases []pipeline.Phase) {
 	cyan := color.New(color.FgCyan)
+	white := color.New(color.FgWhite, color.Bold)
+	dim := color.New(color.Faint)
 
 	// Build phase names for header
 	var names []string
 	for _, p := range phases {
-		names = append(names, string(p))
+		names = append(names, pipeline.PhaseName[p])
 	}
 
 	if pp.debug {
@@ -247,17 +325,18 @@ func (pp *PhaseProgress) PrintLevelHeader(level int, phases []pipeline.Phase) {
 		}
 		fmt.Println("───────────────────────────────────────────────────")
 	} else {
-		// Clean mode: simple format
+		// Clean mode: tree-style format
 		fmt.Println()
-		cyan.Printf("[Level %d]", level)
-		if len(names) > 0 {
-			fmt.Printf(" %v", names)
+		cyan.Print("┌─")
+		white.Printf(" Level %d ", level)
+		if len(phases) > 1 {
+			dim.Printf("(%d parallel)", len(phases))
 		}
 		fmt.Println()
 	}
 }
 
-// PrintSummary prints final summary
+// PrintSummary prints final summary (Osmedeus-style)
 func (pp *PhaseProgress) PrintSummary(totalDuration time.Duration, outputDir string) {
 	pp.mu.RLock()
 	defer pp.mu.RUnlock()
@@ -279,29 +358,73 @@ func (pp *PhaseProgress) PrintSummary(totalDuration time.Duration, outputDir str
 
 	total := len(pp.statuses)
 
-	fmt.Println()
-	fmt.Println("───────────────────────────────────────────────────")
-
-	green := color.New(color.FgGreen)
-	red := color.New(color.FgRed)
+	green := color.New(color.FgGreen, color.Bold)
+	red := color.New(color.FgRed, color.Bold)
 	yellow := color.New(color.FgYellow)
-	cyan := color.New(color.FgCyan)
+	cyan := color.New(color.FgCyan, color.Bold)
+	white := color.New(color.FgWhite, color.Bold)
+	dim := color.New(color.Faint)
 
-	fmt.Printf("Summary: ")
-	green.Printf("%d completed", completed)
+	fmt.Println()
+	cyan.Println("╔══════════════════════════════════════════════════╗")
+	cyan.Print("║")
+	white.Print("                   SCAN COMPLETE                   ")
+	cyan.Println("║")
+	cyan.Println("╠══════════════════════════════════════════════════╣")
+
+	// Status line
+	cyan.Print("║  ")
+	fmt.Print("Status: ")
+	green.Printf("✓ %d completed", completed)
 	if failed > 0 {
-		fmt.Printf(", ")
-		red.Printf("%d failed", failed)
+		fmt.Print(" │ ")
+		red.Printf("✗ %d failed", failed)
 	}
 	if skipped > 0 {
-		fmt.Printf(", ")
-		yellow.Printf("%d skipped", skipped)
+		fmt.Print(" │ ")
+		yellow.Printf("⊘ %d skipped", skipped)
 	}
-	fmt.Printf(" / %d total\n", total)
+	// Padding to align box
+	padding := 48 - (15 + len(fmt.Sprintf("%d", completed)) + len(fmt.Sprintf("%d", failed)) + len(fmt.Sprintf("%d", skipped)))
+	if failed > 0 {
+		padding -= 12
+	}
+	if skipped > 0 {
+		padding -= 14
+	}
+	for i := 0; i < padding; i++ {
+		fmt.Print(" ")
+	}
+	cyan.Println("║")
 
-	cyan.Printf("Total time: %s\n", formatDuration(totalDuration))
-	fmt.Printf("Results: %s\n", outputDir)
-	fmt.Println("───────────────────────────────────────────────────")
+	// Time line
+	cyan.Print("║  ")
+	fmt.Print("Time:   ")
+	white.Printf("%s", formatDuration(totalDuration))
+	dim.Printf(" (%d phases)", total)
+	timePadding := 48 - (8 + len(formatDuration(totalDuration)) + len(fmt.Sprintf(" (%d phases)", total)))
+	for i := 0; i < timePadding; i++ {
+		fmt.Print(" ")
+	}
+	cyan.Println("║")
+
+	cyan.Println("╠══════════════════════════════════════════════════╣")
+
+	// Results line
+	cyan.Print("║  ")
+	fmt.Print("Results: ")
+	dim.Print(outputDir)
+	resultPadding := 48 - (9 + len(outputDir))
+	if resultPadding < 0 {
+		resultPadding = 0
+	}
+	for i := 0; i < resultPadding; i++ {
+		fmt.Print(" ")
+	}
+	cyan.Println("║")
+
+	cyan.Println("╚══════════════════════════════════════════════════╝")
+	fmt.Println()
 }
 
 // IsDebug returns whether debug mode is enabled
