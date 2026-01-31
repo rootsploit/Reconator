@@ -1,4 +1,8 @@
-<h1 align="center">🔍 Reconator</h1>
+<p align="center">
+  <img src="assets/logo-transparent.png" alt="Reconator Logo" width="200">
+</p>
+
+<h1 align="center">Reconator</h1>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Reconator-AI--Powered%20Recon-blueviolet?style=for-the-badge&logo=target" alt="Reconator">
@@ -44,6 +48,7 @@ Reconator is a reconnaissance framework that combines subdomain enumeration, por
 - 🛡️ **WAF/CDN Detection** - Identifies Cloudflare, Akamai + origin IP discovery
 - 🎭 **Tech Fingerprinting** - Wappalyzer-based technology detection
 - ☠️ **Subdomain Takeover** - subjack, subzy for dangling DNS detection
+- 🔐 **DNS & Email Security** - SPF/DKIM/DMARC email validation, CAA/DNSSEC/AXFR DNS security checks
 
 ### 🤖 AI-Powered Intelligence
 
@@ -85,6 +90,14 @@ Reconator is a reconnaissance framework that combines subdomain enumeration, por
 
 - 🖼️ **Screenshot Capture** - gowitness integration for visual evidence
 - ⚡ **Parallel Processing** - Fast screenshot collection across all hosts
+- 🎨 **Visual Clustering** - Groups similar screenshots automatically
+
+### 🔒 DNS & Email Security
+
+- 📧 **Email Authentication** - SPF, DKIM, DMARC record validation with scoring
+- 🛡️ **DNS Security Checks** - CAA records, DNSSEC validation, zone transfer testing
+- 🔍 **Nameserver Analysis** - Detects dangling nameservers and single points of failure
+- 📊 **Security Scores** - 0-100 scoring for email and DNS security posture
 
 ### 🕵️ OSINT Module
 
@@ -150,7 +163,62 @@ reconator scan -l targets.txt
 
 # Passive mode
 reconator scan target.com --passive
+
+# Start web server
+reconator server
+# Access at http://127.0.0.1:8888
 ```
+
+### 🌐 Web Dashboard
+
+Start the web dashboard for real-time scan management:
+
+```bash
+# Start server (localhost only, secure)
+reconator server
+
+# Start with custom API key
+reconator server --api-key "your-secure-key"
+
+# Custom port
+reconator server --port 9000
+```
+
+Then access at **http://127.0.0.1:8888**
+
+**Login credentials**: Username is `reconator`, password is the API key shown in the server console output
+
+### 📁 Output Structure
+
+All scan results are stored in **`~/reconator/`** by default:
+
+```
+~/reconator/
+└── target.com/
+    ├── 1-subdomains/        # Subdomain enumeration results
+    ├── 2-waf/               # WAF/CDN detection
+    ├── 3-ports/             # Port scan results
+    ├── 4-vhost/             # Virtual host discovery
+    ├── 5-takeover/          # Subdomain takeover checks
+    ├── 6-historic/          # Historic URLs
+    ├── 6b-secheaders/       # DNS & Email security findings
+    ├── 7-tech/              # Technology detection
+    ├── 8-dirbrute/          # Directory bruteforce
+    ├── 9-vulnscan/          # Vulnerability findings
+    ├── 9-screenshots/       # Screenshot captures
+    ├── 10-aiguided/         # AI analysis
+    ├── report_target.com.html  # HTML report
+    └── summary.json         # Scan summary
+```
+
+
+**Dashboard Features:**
+- ⚡ Real-time scan progress with live updates
+- 📊 Vulnerability statistics and risk scoring
+- 🔍 Browse and filter scan results
+- 📥 Export results (CSV, JSON, SARIF, HTML)
+- ⚙️ Configure API keys for OSINT/AI providers
+- 🔐 Secure authentication with rate limiting
 
 ### ⚙️ Configuration
 
@@ -224,6 +292,23 @@ Contributions are welcome!
 ---
 
 ## 📋 Changelog
+
+### v1.0.0 - Web Dashboard & Multi-Format Export
+- **🎨 Web Dashboard**: Modern React-based UI with real-time scan progress
+  - Live progress updates with WebSocket streaming
+  - Real-time vulnerability feed during scans
+  - Interactive scan management (start, stop, view results)
+  - Dark theme with responsive design
+  - API key authentication
+- **📤 Multi-Format Export**: CSV, JSON, SARIF, and HTML exports
+  - Self-contained HTML reports with embedded screenshots
+  - SARIF format for GitHub Security integration
+  - Timestamp-based filenames to prevent overwrites
+- **🔧 Performance Improvements**:
+  - **Passive mode optimization**: Skips DNS bruteforce and permutations (alterx/mksub) for faster scans
+    - Keeps API-based discovery and DNS validation for thoroughness
+    - ~30-60 seconds for subdomain enumeration (vs 4-5 minutes with full bruteforce)
+
 
 ### v0.1.2 - Hybrid CVE Detection & Fast XSS Scanning
 - **sxss XSS Scanner**: Fast XSS reflection scanning (150 concurrent threads)

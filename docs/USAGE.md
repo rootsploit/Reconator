@@ -22,6 +22,7 @@ Complete usage documentation for Reconator.
   - [export](#reconator-export)
   - [install](#reconator-install)
   - [check](#reconator-check)
+  - [server](#reconator-server)
   - [monitor](#reconator-monitor)
 - [Examples](#examples)
 - [Changelog](#changelog)
@@ -105,10 +106,11 @@ flowchart LR
 | **5** | Subdomain Takeover | nuclei, subzy, subjack | Vulnerable takeovers |
 | **6** | Historic URLs | waybackurls, gau, waymore, urlfinder, uro, gf | URLs, JS files, params |
 | **7** | Tech Detection | httpx | Technologies, versions |
-| **8** | Directory Bruteforce | feroxbuster, gobuster, ffuf | Hidden paths, admin panels |
-| **9** | Vulnerability Scan | nuclei, dalfox, sxss, searchsploit | Vulnerabilities, XSS, CVEs |
-| **10** | Screenshot Capture | gowitness | Screenshots, clusters |
-| **11** | AI-Guided Scanning | OpenAI/Claude/Gemini + nuclei | CVE analysis, attack chains |
+| **8** | DNS & Email Security | dig, nslookup, nuclei | SPF/DKIM/DMARC, CAA/DNSSEC/AXFR, security scores |
+| **9** | Directory Bruteforce | feroxbuster, gobuster, ffuf | Hidden paths, admin panels |
+| **10** | Vulnerability Scan | nuclei, dalfox, sxss, searchsploit | Vulnerabilities, XSS, CVEs |
+| **11** | Screenshot Capture | gowitness | Screenshots, clusters |
+| **12** | AI-Guided Scanning | OpenAI/Claude/Gemini + nuclei | CVE analysis, attack chains |
 
 ### Key Optimizations
 
@@ -565,13 +567,87 @@ reconator export ./results/example.com --format markdown
 | `markdown` | Summary report | Documentation, sharing |
 | `all` | All formats | Comprehensive export |
 
-### `reconator monitor`
+### `reconator server`
 
-Monitor scan progress in real-time.
+Start the web dashboard server for real-time scan management and visualization.
 
 ```bash
-reconator monitor ./results/example.com
+# Start server on default port (8888)
+reconator server
+
+# Start on custom port
+reconator server --port 9000
+
+# Generate and use API key for authentication
+reconator server --gen-key
+
+# Allow external connections (use with caution!)
+reconator server --host 0.0.0.0
+
+# Use specific API key
+reconator server --api-key YOUR_SECRET_KEY
 ```
+
+**Features:**
+- 🎯 Real-time scan progress with WebSocket updates
+- 📊 Interactive dashboard with vulnerability statistics
+- 🔍 Browse and filter scan results
+- 📥 Export results (CSV, JSON, SARIF, HTML)
+- ⚙️ Configure API keys for OSINT and AI providers
+- 🔐 Optional API key authentication
+- 🛡️ Built-in security (rate limiting, CORS, CSP headers)
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--port` | `-p` | Server port | `8888` |
+| `--host` | `-h` | Server host (use `0.0.0.0` for external access) | `127.0.0.1` |
+| `--api-key` | | API key for authentication | none |
+| `--gen-key` | | Generate random API key | `false` |
+
+**Access:**
+1. Start the server: `reconator server`
+2. Open browser: http://127.0.0.1:8888
+3. Login with credentials (username: `reconator`, password: API key)
+4. Manage scans, view results, configure API keys
+
+**Security Notes:**
+- By default, server binds to `127.0.0.1` (localhost only)
+- Set `--host 0.0.0.0` to allow external connections
+- Always use `--api-key` or `--gen-key` for production deployments
+- API keys are stored securely in `~/.reconator/config.yaml` (0600 permissions)
+
+### `reconator monitor`
+
+Monitor attack surface changes over time. Performs periodic scans and alerts when changes are detected (new subdomains, ports, vulnerabilities, etc.).
+
+```bash
+# Monitor target every 24 hours
+reconator monitor target.com --interval 24h
+
+# Monitor with Slack notifications
+reconator monitor target.com --interval 6h --slack https://hooks.slack.com/...
+
+# Single comparison scan (no continuous monitoring)
+reconator monitor target.com --once
+
+# Monitor multiple targets
+reconator monitor -l targets.txt --interval 12h
+```
+
+**Detects:**
+- 🆕 New subdomains discovered
+- 🔌 New open ports detected
+- 🐛 New vulnerabilities found
+- ⚠️ Subdomain takeover opportunities
+- 🔧 Technology stack changes
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--interval` | | Scan interval (e.g., 6h, 12h, 24h) | `24h` |
+| `--once` | | Single comparison scan | `false` |
+| `--slack` | | Slack webhook URL for alerts | none |
+| `--discord` | | Discord webhook URL for alerts | none |
+| `--webhook` | | Custom webhook URL for alerts | none |
 
 ### `reconator version`
 
