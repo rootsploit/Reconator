@@ -1,0 +1,63 @@
+# Binaries
+/reconator
+/reconator-*
+*.exe
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Frontend build
+# We explicitly track web/dist/ now so the dashboard works after cloning
+!web/dist/
+
+# Test results (contains target-specific data)
+/results/
+/reconbox-results/
+/output/
+/screenshots/
+report_*.html
+*-recon.html
+*-reconator.html
+.txt
+
+# Temp files from scans
+/*.txt
+/results/*.txt
+!wordlists/*.txt
+*.db
+*.sqlite
+*.sqlite3
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.code-workspace
+
+# Temporary files
+*.tmp
+*.log
+
+# Go build
+*.test
+__debug_bin*
+coverage.out
+
+# Configuration with secrets
+/configs/
+!/configs/*.example.yaml
+
+# Sample outputs (for development)
+sample_*.html
+
+# Local 
+rebuild-push.sh
+
+# Docs
+dev-docs/

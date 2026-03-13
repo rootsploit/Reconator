@@ -1,0 +1,127 @@
+version: 2
+
+project_name: reconator
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: reconator
+    main: ./cmd/reconator
+    binary: reconator
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/rootsploit/reconator/internal/version.Version={{.Version}}
+      - -X github.com/rootsploit/reconator/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/rootsploit/reconator/internal/version.Date={{.Date}}
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+      - wordlists/*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: "New Features"
+      regexp: "^.*feat[(\\w)]*:.*$"
+      order: 0
+    - title: "Bug Fixes"
+      regexp: "^.*fix[(\\w)]*:.*$"
+      order: 1
+    - title: "Performance"
+      regexp: "^.*perf[(\\w)]*:.*$"
+      order: 2
+    - title: "Other"
+      order: 999
+
+release:
+  github:
+    owner: rootsploit
+    name: reconator
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
+  header: |
+    ## Reconator v{{.Version}}
+
+    AI-Powered Reconnaissance Framework for Bug Bounty and Security Testing
+
+    ### Installation
+
+    ```bash
+    # Using Go
+    go install github.com/rootsploit/reconator@v{{.Version}}
+
+    # Or download binary from below
+    ```
+  footer: |
+    ---
+
+    **Full Changelog**: https://github.com/rootsploit/reconator/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+    Built with :heart: by [@RootSploit](https://twitter.com/RootSploit)
+
+brews:
+  - repository:
+      owner: rootsploit
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    folder: Formula
+    homepage: "https://github.com/rootsploit/reconator"
+    description: "AI-Powered Reconnaissance Framework"
+    license: "AGPL-3.0"
+    test: |
+      system "#{bin}/reconator", "version"
+    install: |
+      bin.install "reconator"
+    skip_upload: auto
+
+nfpms:
+  - id: packages
+    package_name: reconator
+    vendor: RootSploit
+    homepage: "https://github.com/rootsploit/reconator"
+    maintainer: "RootSploit <rootsploit@proton.me>"
+    description: "AI-Powered Reconnaissance Framework"
+    license: "AGPL-3.0"
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
