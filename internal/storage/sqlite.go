@@ -937,6 +937,36 @@ func (s *SQLiteStorage) SaveSecrets(ctx context.Context, scanID string, secrets 
 	return tx.Commit()
 }
 
+// GetSecrets retrieves all secrets for a scan
+func (s *SQLiteStorage) GetSecrets(ctx context.Context, scanID string) ([]SecretRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, scan_id, detector_type, detector_name, raw_secret, verified, source_url, source_line, severity, discovered_at
+		FROM secrets
+		WHERE scan_id = ?
+		ORDER BY discovered_at DESC
+	`, scanID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var secrets []SecretRecord
+	for rows.Next() {
+		var secret SecretRecord
+		var id int
+		var discoveredAt string
+		var verified int
+		err := rows.Scan(&id, &secret.ScanID, &secret.DetectorType, &secret.DetectorName, &secret.RawSecret, &verified, &secret.SourceURL, &secret.SourceLine, &secret.Severity, &discoveredAt)
+		if err != nil {
+			return nil, err
+		}
+		secret.Verified = verified == 1
+		secrets = append(secrets, secret)
+	}
+
+	return secrets, rows.Err()
+}
+
 // =============================================================================
 // Query Methods for Dashboard
 // =============================================================================
@@ -1268,6 +1298,8 @@ type JSAnalysisRecord struct {
 }
 
 type SecretRecord struct {
+	ID           int
+	ScanID       string
 	DetectorType string
 	DetectorName string
 	RawSecret    string

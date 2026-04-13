@@ -329,6 +329,7 @@ func (s *Server) setupRoutes() {
 			scans.POST("/:id/pause", s.pauseScan)
 			scans.POST("/:id/resume", s.resumeScan)
 			scans.GET("/:id/findings", s.getScanFindings)
+			scans.GET("/:id/secrets", s.getScanSecrets)
 			scans.GET("/:id/report", s.getScanReport)
 		}
 

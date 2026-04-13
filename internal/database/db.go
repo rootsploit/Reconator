@@ -380,6 +380,48 @@ type VulnerabilityRecord struct {
 	CreatedAt       time.Time
 }
 
+// SecretRecord represents a secret found by TruffleHog
+type SecretRecord struct {
+	ID           int
+	ScanID       string
+	DetectorType string
+	DetectorName string
+	RawSecret    string
+	Verified     bool
+	SourceURL    string
+	SourceLine   int
+	Severity     string
+}
+
+// GetSecrets retrieves all secrets for a scan
+func (db *DB) GetSecrets(scanID string) ([]*SecretRecord, error) {
+	query := `
+		SELECT id, scan_id, detector_type, detector_name, raw_secret, verified, source_url, source_line, severity
+		FROM secrets
+		WHERE scan_id = ?
+		ORDER BY severity DESC, id DESC
+	`
+	rows, err := db.conn.Query(query, scanID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var secrets []*SecretRecord
+	for rows.Next() {
+		var s SecretRecord
+		var verified int
+		err := rows.Scan(&s.ID, &s.ScanID, &s.DetectorType, &s.DetectorName, &s.RawSecret, &verified, &s.SourceURL, &s.SourceLine, &s.Severity)
+		if err != nil {
+			return nil, err
+		}
+		s.Verified = verified == 1
+		secrets = append(secrets, &s)
+	}
+
+	return secrets, rows.Err()
+}
+
 // SaveVulnerability saves a vulnerability to the database
 func (db *DB) SaveVulnerability(vuln *VulnerabilityRecord) error {
 	query := `

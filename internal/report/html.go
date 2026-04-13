@@ -2779,6 +2779,11 @@ func Generate(data *Data, outputDir string) error {
                         <span class="badge">{{len .CloudFindings}}</span>
                     </a>
                     {{end}}
+                    <a class="nav-item" onclick="showSection('secrets')">
+                        <span class="icon">🔐</span>
+                        <span>Secrets</span>
+                        <span class="badge{{if .TruffleHog}}{{if gt .TruffleHog.TotalFound 0}}warning{{end}}{{end}}">{{if .TruffleHog}}{{.TruffleHog.TotalFound}}{{else}}0{{end}}</span>
+                    </a>
                     <a class="nav-item" onclick="showSection('takeovers')">
                         <span class="icon">⚠️</span>
                         <span>Takeovers</span>
@@ -2855,6 +2860,11 @@ func Generate(data *Data, outputDir string) error {
                         <div class="label">🔓 Vulnerabilities</div>
                         <div class="value">{{if .VulnScan}}{{len .VulnScan.Vulnerabilities}}{{else}}0{{end}}</div>
                         <div class="subtext">{{if .VulnScan}}{{add (index .VulnScan.BySeverity "critical") (index .VulnScan.BySeverity "high")}} critical/high{{end}}</div>
+                    </div>
+                    <div class="stat-card warning" onclick="navigateToSection('secrets')" style="cursor: pointer;">
+                        <div class="label">🔐 Secrets</div>
+                        <div class="value">{{if .TruffleHog}}{{.TruffleHog.TotalFound}}{{else}}0{{end}}</div>
+                        <div class="subtext">{{if .TruffleHog}}{{.TruffleHog.Verified}} verified{{end}}</div>
                     </div>
                     <div class="stat-card warning" onclick="navigateToSectionWithFilter('assets', 'takeover')" style="cursor: pointer;">
                         <div class="label">⚠️ Takeovers</div>
@@ -3636,6 +3646,69 @@ func Generate(data *Data, outputDir string) error {
                         <span style="font-size: 3rem;">🔓</span>
                         <p style="margin-top: 16px;">Vulnerability scanning not yet performed.</p>
                         <p style="font-size: 0.875rem;">Run a full scan to detect security issues using Nuclei templates.</p>
+                    </div>
+                </div>
+                {{end}}
+            </section>
+
+            <!-- Secrets (TruffleHog) Section -->
+            <section class="section" id="secrets">
+                <div class="section-header">
+                    <h1 class="section-title">Secrets & API Keys</h1>
+                    <p class="section-subtitle">{{if .TruffleHog}}{{.TruffleHog.TotalFound}} secrets found ({{.TruffleHog.Verified}} verified){{else}}No secret scanning performed{{end}}</p>
+                </div>
+
+                {{if .TruffleHog}}{{if .TruffleHog.Secrets}}
+                <!-- Severity Summary Stats -->
+                <div class="vuln-stats">
+                    {{if gt .TruffleHog.Verified 0}}<div class="vuln-stat critical"><span class="vuln-stat-count">{{.TruffleHog.Verified}}</span><span class="vuln-stat-label">Verified</span></div>{{end}}
+                    {{if gt (sub .TruffleHog.TotalFound .TruffleHog.Verified) 0}}<div class="vuln-stat high"><span class="vuln-stat-count">{{sub .TruffleHog.TotalFound .TruffleHog.Verified}}</span><span class="vuln-stat-label">Unverified</span></div>{{end}}
+                    <div class="vuln-stat"><span class="vuln-stat-count">{{.TruffleHog.FilesScanned}}</span><span class="vuln-stat-label">Files Scanned</span></div>
+                </div>
+
+                <!-- Secrets List -->
+                <div class="vuln-list">
+                    {{range .TruffleHog.Secrets}}
+                    <div class="vuln-item {{if .Verified}}critical{{else}}high{{end}}" data-severity="{{if .Verified}}critical{{else}}high{{end}}" onclick="toggleVuln(this)">
+                        <div class="vuln-header">
+                            <div class="vuln-info">
+                                <span class="vuln-severity {{if .Verified}}critical{{else}}high{{end}}">{{if .Verified}}VERIFIED{{else}}UNVERIFIED{{end}}</span>
+                                <span class="vuln-name">{{.DetectorName}}</span>
+                                <span class="vuln-type">({{.DetectorType}})</span>
+                            </div>
+                            <div class="vuln-meta">
+                                <span class="vuln-source">{{.SourceType}}: {{.SourceURL}}</span>
+                                {{if .Line}}<span class="vuln-line">Line {{.Line}}</span>{{end}}
+                            </div>
+                        </div>
+                        <div class="vuln-details">
+                            <div class="vuln-detail-row">
+                                <strong>Secret:</strong> <code>{{.Raw}}</code>
+                            </div>
+                            {{if .Redacted}}
+                            <div class="vuln-detail-row">
+                                <strong>Redacted:</strong> <code>{{.Redacted}}</code>
+                            </div>
+                            {{end}}
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+                {{else}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">🔐</span>
+                        <p style="margin-top: 16px;">No secrets found.</p>
+                        <p style="font-size: 0.875rem;">TruffleHog scanning did not find any exposed secrets or API keys.</p>
+                    </div>
+                </div>
+                {{end}}
+                {{else}}
+                <div class="card">
+                    <div class="card-body" style="text-align: center; padding: 40px; color: var(--text-muted);">
+                        <span style="font-size: 3rem;">🔐</span>
+                        <p style="margin-top: 16px;">Secret scanning not yet performed.</p>
+                        <p style="font-size: 0.875rem;">Run a full scan to detect exposed secrets using TruffleHog.</p>
                     </div>
                 </div>
                 {{end}}

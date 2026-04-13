@@ -3,13 +3,16 @@ import { api } from '../utils/api'
 
 function Findings({ scan, onBack }) {
   const [findings, setFindings] = useState([])
+  const [secrets, setSecrets] = useState([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('all')
+  const [tab, setTab] = useState('vulnerabilities')
   const [report, setReport] = useState(null)
 
   useEffect(() => {
     if (scan?.id) {
       fetchFindings()
+      fetchSecrets()
       fetchReport()
     }
   }, [scan?.id])
@@ -22,6 +25,15 @@ function Findings({ scan, onBack }) {
       console.error('Failed to fetch findings:', error)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const fetchSecrets = async () => {
+    try {
+      const response = await api.get(`/scans/${scan.id}/secrets`)
+      setSecrets(response.findings || [])
+    } catch (error) {
+      console.error('Failed to fetch secrets:', error)
     }
   }
 
@@ -69,40 +81,43 @@ function Findings({ scan, onBack }) {
       </div>
 
       <div className="stats-grid" style={{ marginBottom: 24 }}>
-        <div className="stat-card"><div className="label">Total Findings</div><div className="value">{findings.length}</div></div>
+        <div className="stat-card"><div className="label">Vulnerabilities</div><div className="value">{findings.length}</div></div>
         <div className="stat-card"><div className="label">Critical</div><div className="value critical">{severityCounts.critical || 0}</div></div>
         <div className="stat-card"><div className="label">High</div><div className="value high">{severityCounts.high || 0}</div></div>
-        <div className="stat-card"><div className="label">Medium</div><div className="value medium">{severityCounts.medium || 0}</div></div>
+        <div className="stat-card warning"><div className="label">Secrets</div><div className="value">{secrets.length}</div></div>
       </div>
-
-      {report && (
-        <div className="card" style={{ marginBottom: 24 }}>
-          <div className="card-header"><h2>Scan Summary</h2></div>
-          <div className="card-body">
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 16 }}>
-              {report.Subdomain && <div><div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Subdomains</div><div style={{ fontSize: 20, fontWeight: 600 }}>{report.Subdomain.total || 0}</div></div>}
-              {report.Ports && <div><div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Alive Hosts</div><div style={{ fontSize: 20, fontWeight: 600 }}>{report.Ports.alive_count || 0}</div></div>}
-              {report.Ports && <div><div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Open Ports</div><div style={{ fontSize: 20, fontWeight: 600 }}>{report.Ports.total_ports || 0}</div></div>}
-              {report.Tech && <div><div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Technologies</div><div style={{ fontSize: 20, fontWeight: 600 }}>{Object.keys(report.Tech.tech_count || {}).length}</div></div>}
-            </div>
-          </div>
-        </div>
-      )}
 
       <div className="card">
         <div className="card-header">
-          <h2>Vulnerabilities</h2>
-          <div className="tabs" style={{ margin: 0, border: 'none' }}>
-            {['all', 'critical', 'high', 'medium', 'low', 'info'].map(sev => (
-              <div key={sev} className={`tab ${filter === sev ? 'active' : ''}`} onClick={() => setFilter(sev)} style={{ padding: '8px 12px' }}>
-                {sev.charAt(0).toUpperCase() + sev.slice(1)}
-              </div>
-            ))}
+          <div className="tabs" style={{ margin: 0, border: 'none', display: 'flex', gap: 16 }}>
+            <div className={`tab ${tab === 'vulnerabilities' ? 'active' : ''}`} onClick={() => setTab('vulnerabilities')} style={{ padding: '8px 12px', cursor: 'pointer' }}>
+              Vulnerabilities ({findings.length})
+            </div>
+            <div className={`tab ${tab === 'secrets' ? 'active' : ''}`} onClick={() => setTab('secrets')} style={{ padding: '8px 12px', cursor: 'pointer' }}>
+              Secrets ({secrets.length})
+            </div>
           </div>
+          {tab === 'vulnerabilities' && (
+            <div className="tabs" style={{ margin: 0, border: 'none' }}>
+              {['all', 'critical', 'high', 'medium', 'low', 'info'].map(sev => (
+                <div key={sev} className={`tab ${filter === sev ? 'active' : ''}`} onClick={() => setFilter(sev)} style={{ padding: '8px 12px' }}>
+                  {sev.charAt(0).toUpperCase() + sev.slice(1)}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         <div className="card-body" style={{ padding: 0 }}>
           {loading ? (
             <div className="empty-state"><div className="animate-pulse">Loading...</div></div>
+          ) : tab === 'secrets' ? (
+            secrets.length === 0 ? (
+              <div className="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 48, height: 48 }}><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                <h3>No secrets found</h3>
+                <p>No exposed API keys or secrets detected</p>
+              </div>
+            ) : secrets.map((secret, idx) => <SecretItem key={idx} secret={secret} />)
           ) : filteredFindings.length === 0 ? (
             <div className="empty-state">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 48, height: 48 }}><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
@@ -134,6 +149,32 @@ function FindingItem({ finding }) {
       </div>
       {expanded && finding.description && (
         <div className="finding-expanded">{finding.description}</div>
+      )}
+    </div>
+  )
+}
+
+function SecretItem({ secret }) {
+  const [expanded, setExpanded] = useState(false)
+  const badgeClass = secret.verified ? 'badge-critical' : 'badge-high'
+
+  return (
+    <div className={`finding-item ${secret.verified ? 'critical' : 'high'}`} onClick={() => setExpanded(!expanded)}>
+      <div className="finding-header">
+        <span className={`badge ${badgeClass}`}>{secret.verified ? 'VERIFIED' : 'UNVERIFIED'}</span>
+        <div className="finding-title">{secret.name}</div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s', color: 'var(--text-muted)' }}><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div className="finding-details">
+        <code>{secret.source_url}</code>
+        {secret.source_line && <span style={{ marginLeft: 8, color: 'var(--text-muted)' }}>Line {secret.source_line}</span>}
+        <span style={{ marginLeft: 8, color: 'var(--text-muted)' }}>[{secret.detector_type}]</span>
+      </div>
+      {expanded && (
+        <div className="finding-expanded">
+          <div><strong>Tool:</strong> {secret.tool}</div>
+          <div style={{ marginTop: 8 }}><strong>Raw:</strong> <code style={{ fontSize: 12 }}>{secret.raw || '***'}</code></div>
+        </div>
       )}
     </div>
   )

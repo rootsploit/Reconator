@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -345,6 +346,104 @@ func (s *Server) getScanFindings(c *gin.Context) {
 	})
 }
 
+// getScanSecrets returns TruffleHog secrets for a scan
+func (s *Server) getScanSecrets(c *gin.Context) {
+	id := c.Param("id")
+
+	scan, err := s.scanMgr.GetScan(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "Scan not found",
+		})
+		return
+	}
+
+	// Check if database is available
+	if s.scanMgr.db != nil {
+		secrets, err := s.scanMgr.db.GetSecrets(id)
+		if err != nil {
+			log.Printf("[ERROR] getScanSecrets - GetSecrets failed for scan %s: %v", id, err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to load secrets: " + err.Error(),
+			})
+			return
+		}
+
+		// Convert to API response format
+		findings := make([]SecretFinding, 0, len(secrets))
+		for _, secret := range secrets {
+			findings = append(findings, SecretFinding{
+				ID:           secret.ID,
+				Severity:     secret.Severity,
+				Name:         secret.DetectorName,
+				DetectorType: secret.DetectorType,
+				SourceURL:    secret.SourceURL,
+				SourceLine:   secret.SourceLine,
+				Verified:     secret.Verified,
+				Tool:         "trufflehog",
+			})
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"scan_id":  id,
+			"findings": findings,
+			"total":    len(findings),
+		})
+		return
+	}
+
+	// Fallback: Load from JSON file
+	secretsFile := filepath.Join(scan.OutputDir, "7c-trufflehog", "trufflehog_secrets.json")
+	data, err := os.ReadFile(secretsFile)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"scan_id":  id,
+			"findings": []SecretFinding{},
+			"total":    0,
+		})
+		return
+	}
+
+	var truffleResult struct {
+		Secrets []struct {
+			DetectorName string `json:"detector_name"`
+			DetectorType string `json:"detector_type"`
+			SourceType   string `json:"source_type"`
+			SourceURL    string `json:"source_url"`
+			Line         int    `json:"line"`
+			Verified     bool   `json:"verified"`
+		} `json:"secrets"`
+	}
+
+	if err := json.Unmarshal(data, &truffleResult); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to parse secrets: " + err.Error(),
+		})
+		return
+	}
+
+	findings := make([]SecretFinding, 0, len(truffleResult.Secrets))
+	severityMap := map[bool]string{true: "high", false: "medium"}
+	for i, secret := range truffleResult.Secrets {
+		findings = append(findings, SecretFinding{
+			ID:           i + 1,
+			Severity:     severityMap[secret.Verified],
+			Name:         secret.DetectorName,
+			DetectorType: secret.DetectorType,
+			SourceURL:    secret.SourceURL,
+			SourceLine:   secret.Line,
+			Verified:     secret.Verified,
+			Tool:         "trufflehog",
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"scan_id":  id,
+		"findings": findings,
+		"total":    len(findings),
+	})
+}
+
 // getScanReport returns the full report for a scan
 func (s *Server) getScanReport(c *gin.Context) {
 	id := c.Param("id")
@@ -544,6 +643,18 @@ type Finding struct {
 	Type        string `json:"type"`
 	Tool        string `json:"tool"`
 	Description string `json:"description,omitempty"`
+}
+
+// SecretFinding represents a secret found by TruffleHog
+type SecretFinding struct {
+	ID           int    `json:"id"`
+	Severity     string `json:"severity"`
+	Name         string `json:"name"`
+	DetectorType string `json:"detector_type"`
+	SourceURL    string `json:"source_url"`
+	SourceLine   int    `json:"source_line"`
+	Verified     bool   `json:"verified"`
+	Tool         string `json:"tool"`
 }
 
 // Helper to filter findings by severity
