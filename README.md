@@ -421,6 +421,16 @@ Built with tools from:
 - [sensepost](https://github.com/sensepost) - gowitness
 
 ---
+## 📚 Research
+
+This project is documented in two peer-reviewable preprints on Zenodo:
+
+| Year | Paper | DOI |
+|------|-------|-----|
+| 2021 | Advanced Attack Surface Management: Automated External Reconnaissance Using Modular Tool Orchestration | [10.5281/zenodo.19979528](https://doi.org/10.5281/zenodo.19979528) |
+| 2026 | Reconator v2: AI-Powered Reconnaissance with Adaptive Pipeline Orchestration | [10.5281/zenodo.19981148](https://doi.org/10.5281/zenodo.19981148) |
+
+---
 
 ## 📋 Changelog
 
